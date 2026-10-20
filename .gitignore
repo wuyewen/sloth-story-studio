@@ -1,0 +1,26 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+release/
+
+# TypeScript 增量编译缓存
+*.tsbuildinfo
+
+# 日志
+*.log
+npm-debug.log*
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 环境变量与本地密钥
+.env
+.env.*
+!.env.example
+
+# 编辑器
+.vscode/
+.idea/

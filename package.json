@@ -1,0 +1,72 @@
+{
+  "name": "sloth-story-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first AI novel-writing desktop studio",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "npm run build:main && node scripts/dev-prepare.mjs && concurrently -k \"vite --host 127.0.0.1\" \"tsc -b tsconfig.main.json --watch\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "build": "tsc -b && vite build && electron-builder",
+    "build:main": "tsc -b tsconfig.main.json",
+    "build:renderer": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.12.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "~5.7.2",
+    "vite": "^6.0.5",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "studio.sloth.story",
+    "productName": "Sloth Story Studio",
+    "directories": {
+      "buildResources": "assets/branding"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets/branding",
+        "to": "branding",
+        "filter": [
+          "app-icon-512.png",
+          "app-icon-1024.png",
+          "tray-icon.png",
+          "tray-icon@2x.png"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/branding/app-icon-512.png"
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "icon": "assets/branding/app-icon.icns",
+      "extendInfo": {
+        "CFBundleName": "Story Studio"
+      }
+    }
+  }
+}

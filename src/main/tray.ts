@@ -1,0 +1,38 @@
+import { app, Menu, nativeImage, Tray } from "electron";
+import { openConfigWindow, openMainWindow } from "./windows.js";
+
+let tray: Tray | null = null;
+let isQuitting = false;
+
+export function getIsQuitting(): boolean {
+  return isQuitting;
+}
+
+
+export function createTray(): Tray {
+  if (tray) return tray;
+
+  const image = nativeImage.createFromDataURL("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABIAAAASCAYAAABWzo5XAAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAEqADAAQAAAABAAAAEgAAAACaqbJVAAACoUlEQVQ4Ea2TS2gTYRSFZyaTNAmTxKRUqxa68LFoC8UuKgoi2Wh9g1oVcaHYLtwIFQouSle6cyF140oNokQUH6surRUEm0K1QmlRCBapWmzSvEoyzmT87pAUpF2JF86c+5/7+J+jKP/J1PX6bMBs2z6hadp+x3FayFlSVXUcTuZyuex6NWsahUKhfRTdBW1SQCMTygAf2jfGffl8PmUYRhPjI4VC4TExU+ezaixkV7VafUlCDHEa3KHwF+MQvkUsAHeAKbQoiOMnwV+mhcPh0Ugk4sBJsBv/GWzVNBt/DgxTJQ3FPKxMVu6TrekkdjLbV2b4xHgB7oefs5pW+BHjMfgDbKH1AC/bu4mmchQD6PfEacSZQ3xPwlMOWM5hEO0AzS/hT4BMqVT6wWqGyDsGHC6jH00mdk3zeDyyfz+Fh0E3xeVakzE4SuPX5Nxi1b00XCF3BuxE73I71D66ZVkGYkNtbFJ8VnzYB8kKRvFvs4Ig/htuaZGmL/Dl7M7QvJltjmgIriEIT4KD4lO8F7wi6QJvZ7JYLI4HAoEV2R7xLmIGuU/AIaDUr194Ckjj7UDej9BpCrfAX0CsUql006CZWC9H0MZO8uhhoGiI9UeZYHwO1MdpYgOMP1PcDp8CLTS4yvg3eEtctvYdXdEQbFhe7iKIA7EFEq7BMeJBihPM3oN/XNf1FHojuELOVvgdcBv9hNPAC/xAzEvhUQrLJJv49+EEWOZyzsMPiF0E8jBl24rGLSzBMwTl5uZFxJrAZRJH4FliKbAJfw/addjPeBae4GnIz+werhzsDWbdAQ+T+BHdxBeT1cp5bIblRlvx5UaLYEh+3mUMffVgFf6ZjQS3cR5pOMpMQd7OPBPYjE+CDLE4XEZ7mM1mp6XBv1r9RtfU/wFCA0cDhzZ7YQAAAABJRU5ErkJggg==");
+  image.addRepresentation({ scaleFactor: 2, buffer: Buffer.from("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", "base64") });
+
+  tray = new Tray(image);
+  tray.setToolTip("Sloth Story Studio");
+
+  const menu = Menu.buildFromTemplate([
+    { label: "打开主窗口", click: () => openMainWindow() },
+    { label: "大模型配置", click: () => openConfigWindow("models") },
+    { label: "系统设置", click: () => openConfigWindow("settings") },
+    { type: "separator" },
+    {
+      label: "退出",
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+  tray.setContextMenu(menu);
+  tray.on("click", () => openMainWindow());
+
+  return tray;
+}
