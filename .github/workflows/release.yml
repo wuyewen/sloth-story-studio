@@ -1,0 +1,34 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest = Apple 芯片（arm64），macos-15-intel = Intel（x86_64）
+        platform: [macos-latest, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      # 版本号以 tag 为准：构建前把 tag（去掉 v 前缀）写进 package.json，
+      # 避免安装包版本与 tag 不一致（只改 CI 里的临时副本，不回写仓库）
+      - name: Sync version from tag
+        run: |
+          node -e "const fs=require('fs');const p='package.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.version=process.env.GITHUB_REF_NAME.replace(/^v/,'');fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n')"
+      - run: npm ci
+      # npm run build = tsc -b && vite build && electron-builder；
+      # --publish always 让 electron-builder 直接创建 GitHub Release 并上传安装包
+      - name: Build & publish
+        run: npm run build -- --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
