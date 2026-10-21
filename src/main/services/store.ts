@@ -52,7 +52,9 @@ export type { ModelRecord };
 
 const DEFAULT_SETTINGS: AppSettings = {
   novelDir: "",
-  backgroundImage: null
+  backgroundImage: null,
+  agentDir: "",
+  workflowDir: ""
 };
 
 export function readSettings(): AppSettings {
@@ -64,6 +66,33 @@ export function writeSettings(settings: AppSettings): void {
 }
 
 // ---- agents ----
+
+// agents/workflows 支持自定义存储目录（settings.agentDir / workflowDir），默认在应用数据目录
+function customFile(dirSetting: string, fileName: string): string {
+  if (dirSetting) {
+    fs.mkdirSync(dirSetting, { recursive: true });
+    return path.join(dirSetting, fileName);
+  }
+  return path.join(dataDir(), fileName);
+}
+
+function agentsFile(): string {
+  return customFile(readSettings().agentDir, "agents.json");
+}
+
+function workflowsFile(): string {
+  return customFile(readSettings().workflowDir, "workflows.json");
+}
+
+// 目录切换时把现有内容迁移到新位置（目标已存在则不覆盖）
+export function migrateStoreFile(fileName: string, targetDir: string): void {
+  const target = path.join(targetDir, fileName);
+  if (fs.existsSync(target)) return;
+  const source = path.join(dataDir(), fileName);
+  if (!fs.existsSync(source)) return;
+  fs.mkdirSync(targetDir, { recursive: true });
+  fs.copyFileSync(source, target);
+}
 
 const BUILTIN_AGENTS: Array<Omit<AgentProfile, "id" | "createdAt" | "updatedAt">> = [
   {
@@ -108,10 +137,25 @@ const BUILTIN_AGENTS: Array<Omit<AgentProfile, "id" | "createdAt" | "updatedAt">
   }
 ];
 
+function writeJsonAbs(file: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), "utf-8");
+  fs.renameSync(tmp, file);
+}
+
+function readJsonAbs<T>(file: string, fallback: T): T {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf-8")) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 export function readAgents(): AgentProfile[] {
-  const seededFlag = path.join(dataDir(), ".agents-seeded");
-  let agents = readJson<AgentProfile[]>("agents.json", []);
-  if (!fs.existsSync(seededFlag)) {
+  const file = agentsFile();
+  let agents = readJsonAbs<AgentProfile[]>(file, []);
+  if (!fs.existsSync(file)) {
     const now = Date.now();
     const builtins: AgentProfile[] = BUILTIN_AGENTS.map((a) => ({
       ...a,
@@ -120,14 +164,13 @@ export function readAgents(): AgentProfile[] {
       updatedAt: now
     }));
     agents = [...builtins, ...agents.filter((a) => !a.builtin)];
-    writeJson("agents.json", agents);
-    fs.writeFileSync(seededFlag, String(now), "utf-8");
+    writeAgents(agents);
   }
   return agents;
 }
 
 export function writeAgents(agents: AgentProfile[]): void {
-  writeJson("agents.json", agents);
+  writeJsonAbs(agentsFile(), agents);
 }
 
 // ---- workflows ----
@@ -233,10 +276,9 @@ function buildBuiltinWorkflow(agentIdByName: (name: string) => string | null): W
 }
 
 export function readWorkflows(): WorkflowDef[] {
-  const seededFlag = path.join(dataDir(), ".workflows-seeded");
-  let workflows = readJson<WorkflowDef[]>("workflows.json", []);
-  if (!fs.existsSync(seededFlag)) {
-    const now = Date.now();
+  const file = workflowsFile();
+  let workflows = readJsonAbs<WorkflowDef[]>(file, []);
+  if (!fs.existsSync(file)) {
     const agents = readAgents();
     const byName = (name: string): string | null =>
       (agents.find((a) => a.builtin && a.name === name) ?? agents.find((a) => a.name === name))?.id ?? null;
@@ -246,12 +288,11 @@ export function readWorkflows(): WorkflowDef[] {
     } else {
       workflows = [buildBuiltinWorkflow(byName), ...workflows];
     }
-    writeJson("workflows.json", workflows);
-    fs.writeFileSync(seededFlag, String(now), "utf-8");
+    writeJsonAbs(file, workflows);
   }
   return workflows;
 }
 
 export function writeWorkflows(workflows: WorkflowDef[]): void {
-  writeJson("workflows.json", workflows);
+  writeJsonAbs(workflowsFile(), workflows);
 }

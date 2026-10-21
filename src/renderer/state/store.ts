@@ -23,7 +23,7 @@ interface StudioState {
   patchSettings: (patch: Partial<AppSettings>) => Promise<void>;
 }
 
-export const useStudio = create<StudioState>((set) => ({
+export const useStudio = create<StudioState>((set, get) => ({
   ready: false,
   providers: [],
   agents: [],
@@ -44,7 +44,13 @@ export const useStudio = create<StudioState>((set) => ({
       sloth.settings.get()
     ]);
     set({ providers, agents, projects, workflows, settings, ready: true });
-    sloth.settings.onChanged((next) => set({ settings: next }));
+    sloth.settings.onChanged((next) => {
+      set({ settings: next });
+      // 目录类设置变化后，相关数据可能来自新位置，全部刷新
+      void get().refreshAgents();
+      void get().refreshWorkflows();
+      void get().refreshProjects();
+    });
     sloth.models.onChanged((next) => set({ providers: next }));
   },
 

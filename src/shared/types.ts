@@ -64,6 +64,8 @@ export interface NovelProject {
 export interface AppSettings {
   novelDir: string;
   backgroundImage: string | null; // dataURL
+  agentDir: string; // 自定义 Agent 存储目录，空为默认（应用数据目录）
+  workflowDir: string; // 自定义工作流存储目录，空为默认
 }
 
 // ---- LLM ----

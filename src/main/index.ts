@@ -25,6 +25,18 @@ function setDockIcon(): void {
 
 app.setName("Story Studio");
 
+// 单实例：重复启动时聚焦已有主窗口而不是再起一个进程
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    const win = openMainWindow();
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
+}
+
 app.whenReady().then(() => {
   setDockIcon();
   registerIpc();

@@ -13,6 +13,7 @@ import type {
   WorkflowNode
 } from "../../shared/types.js";
 import {
+  migrateStoreFile,
   newId,
   readAgents,
   readModels,
@@ -136,7 +137,14 @@ export function registerIpc(): void {
   ipcMain.handle("settings:get", (): AppSettings => readSettings());
 
   ipcMain.handle("settings:set", (e, patch: Partial<AppSettings>): AppSettings => {
-    const next = { ...readSettings(), ...patch };
+    const prev = readSettings();
+    if (patch.agentDir && patch.agentDir !== prev.agentDir) {
+      migrateStoreFile("agents.json", patch.agentDir);
+    }
+    if (patch.workflowDir && patch.workflowDir !== prev.workflowDir) {
+      migrateStoreFile("workflows.json", patch.workflowDir);
+    }
+    const next = { ...prev, ...patch };
     writeSettings(next);
     for (const wc of webContents.getAllWebContents()) {
       if (wc.id !== e.sender.id && !wc.isDestroyed()) wc.send("settings:changed", next);

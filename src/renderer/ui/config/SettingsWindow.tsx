@@ -22,6 +22,16 @@ export default function SettingsWindow() {
     if (dir) await patchSettings({ novelDir: dir });
   }
 
+  async function pickAgentDir() {
+    const dir = await sloth!.settings.pickDirectory();
+    if (dir) await patchSettings({ agentDir: dir });
+  }
+
+  async function pickWorkflowDir() {
+    const dir = await sloth!.settings.pickDirectory();
+    if (dir) await patchSettings({ workflowDir: dir });
+  }
+
   async function pickBg() {
     const img = await sloth!.settings.pickBackgroundImage();
     if (img) await patchSettings({ backgroundImage: img });
@@ -49,6 +59,54 @@ export default function SettingsWindow() {
               <button className="ghost-button" onClick={pickDir}>
                 <FolderOpen size={14} /> 选择目录
               </button>
+            </div>
+          </div>
+
+          <div className="setting-block">
+            <div className="setting-copy">
+              <strong>Agent 目录</strong>
+              <small>Agent 定义（agents.json）保存位置；切换时自动迁移现有内容。留空为默认应用数据目录。</small>
+            </div>
+            <div className="setting-ctl">
+              <input
+                className="text-input"
+                readOnly
+                value={settings.agentDir}
+                placeholder="默认（应用数据目录）"
+                title={settings.agentDir || "默认（应用数据目录）"}
+              />
+              <button className="ghost-button" onClick={pickAgentDir}>
+                <FolderOpen size={14} /> 选择目录
+              </button>
+              {settings.agentDir && (
+                <button className="ghost-button danger-text" onClick={() => patchSettings({ agentDir: "" })}>
+                  <Trash2 size={14} /> 恢复默认
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="setting-block">
+            <div className="setting-copy">
+              <strong>Workflows 目录</strong>
+              <small>工作流定义（workflows.json）保存位置；切换时自动迁移现有内容。留空为默认应用数据目录。</small>
+            </div>
+            <div className="setting-ctl">
+              <input
+                className="text-input"
+                readOnly
+                value={settings.workflowDir}
+                placeholder="默认（应用数据目录）"
+                title={settings.workflowDir || "默认（应用数据目录）"}
+              />
+              <button className="ghost-button" onClick={pickWorkflowDir}>
+                <FolderOpen size={14} /> 选择目录
+              </button>
+              {settings.workflowDir && (
+                <button className="ghost-button danger-text" onClick={() => patchSettings({ workflowDir: "" })}>
+                  <Trash2 size={14} /> 恢复默认
+                </button>
+              )}
             </div>
           </div>
 
