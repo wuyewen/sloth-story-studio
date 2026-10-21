@@ -63,10 +63,7 @@
       "target": [
         "dmg"
       ],
-      "icon": "assets/branding/app-icon.icns",
-      "extendInfo": {
-        "CFBundleName": "Story Studio"
-      }
+      "icon": "assets/branding/app-icon.icns"
     }
   }
 }
