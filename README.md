@@ -63,6 +63,20 @@ npm run build:renderer   # 仅渲染层
 npm run build            # 完整打包（electron-builder，输出 dmg / nsis）
 ```
 
+## 发布（自动构建安装包）
+
+推送 `v*` 标签即可触发 GitHub Actions 自动构建并发布三平台安装包（`.github/workflows/release.yml`）：
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+- 构建矩阵：macOS Apple 芯片（arm64）、macOS Intel（x86_64）、Windows（x64）
+- 版本号以 tag 为准（CI 临时写入 package.json，不回写仓库）
+- 产物自动上传到对应的 GitHub Release
+- 未签名：macOS 首次打开需右键 → 打开；消除提示需配置 Apple 开发者证书 secrets
+
 ## 目录结构
 ```
 src/
