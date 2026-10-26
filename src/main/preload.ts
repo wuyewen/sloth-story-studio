@@ -6,6 +6,7 @@ import type {
   ChatRequest,
   ModelProviderInfo,
   ModelProviderInput,
+  ProposalInput,
   SlothApi,
   WorkflowEdge,
   WorkflowInput,
@@ -58,6 +59,14 @@ const api: SlothApi = {
     list: () => ipcRenderer.invoke("novels:list"),
     create: (title: string, synopsis: string) => ipcRenderer.invoke("novels:create", title, synopsis),
     rename: (id: string, title: string) => ipcRenderer.invoke("novels:rename", id, title),
+    updateMeta: (id: string, patch: { title?: string; synopsis?: string }) =>
+      ipcRenderer.invoke("novels:updateMeta", id, patch),
+    assignWorkflow: (projectId: string, workflowId: string) =>
+      ipcRenderer.invoke("novels:assignWorkflow", projectId, workflowId),
+    unassignWorkflow: (projectId: string, workflowId: string) =>
+      ipcRenderer.invoke("novels:unassignWorkflow", projectId, workflowId),
+    setWorkflowSlot: (projectId: string, slot: string, workflowId: string | null) =>
+      ipcRenderer.invoke("novels:setWorkflowSlot", projectId, slot, workflowId),
     remove: (id: string) => ipcRenderer.invoke("novels:remove", id),
     createChapter: (projectId: string, title: string) =>
       ipcRenderer.invoke("novels:createChapter", projectId, title),
@@ -66,7 +75,29 @@ const api: SlothApi = {
     readChapter: (projectId: string, chapterId: string) =>
       ipcRenderer.invoke("novels:readChapter", projectId, chapterId),
     writeChapter: (projectId: string, chapterId: string, content: string) =>
-      ipcRenderer.invoke("novels:writeChapter", projectId, chapterId, content)
+      ipcRenderer.invoke("novels:writeChapter", projectId, chapterId, content),
+    createUnit: (projectId: string, title: string) =>
+      ipcRenderer.invoke("novels:createUnit", projectId, title),
+    renameUnit: (projectId: string, unitId: string, title: string) =>
+      ipcRenderer.invoke("novels:renameUnit", projectId, unitId, title),
+    setChapterUnit: (projectId: string, chapterId: string, unitId: string) =>
+      ipcRenderer.invoke("novels:setChapterUnit", projectId, chapterId, unitId),
+    memoryList: (projectId: string) => ipcRenderer.invoke("novels:memoryList", projectId),
+    memoryRead: (projectId: string, rel: string) =>
+      ipcRenderer.invoke("novels:memoryRead", projectId, rel),
+    memoryWrite: (projectId: string, rel: string, content: string) =>
+      ipcRenderer.invoke("novels:memoryWrite", projectId, rel, content),
+    memoryDelete: (projectId: string, rel: string) =>
+      ipcRenderer.invoke("novels:memoryDelete", projectId, rel),
+    memoryHistory: (projectId: string, rel: string) =>
+      ipcRenderer.invoke("novels:memoryHistory", projectId, rel),
+    memoryReadVersion: (projectId: string, rel: string, ts: number) =>
+      ipcRenderer.invoke("novels:memoryReadVersion", projectId, rel, ts),
+    memoryRestore: (projectId: string, rel: string, ts: number) =>
+      ipcRenderer.invoke("novels:memoryRestore", projectId, rel, ts),
+    runHistory: (projectId: string) => ipcRenderer.invoke("novels:runHistory", projectId),
+    revealArtifact: (projectId: string, rel: string) =>
+      ipcRenderer.invoke("novels:revealArtifact", projectId, rel)
   },
   llm: {
     chat: (req: ChatRequest) => ipcRenderer.invoke("llm:chat", req),
@@ -89,10 +120,23 @@ const api: SlothApi = {
       ipcRenderer.invoke("workflows:generate", description, providerId),
     optimize: (current: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, instruction: string, providerId: string) =>
       ipcRenderer.invoke("workflows:optimize", current, instruction, providerId),
-    run: (runId: string, workflowId: string, input: string) =>
-      ipcRenderer.invoke("workflows:run", runId, workflowId, input),
+    run: (runId: string, workflowId: string, input: string, projectId?: string) =>
+      ipcRenderer.invoke("workflows:run", runId, workflowId, input, projectId),
     stop: (runId: string) => ipcRenderer.invoke("workflows:stop", runId),
     onEvent: (cb) => subscribe<[WorkflowRunEvent]>("workflow:event", cb)
+  },
+  proposals: {
+    list: (projectId: string) => ipcRenderer.invoke("proposals:list", projectId),
+    create: (projectId: string, input: ProposalInput) =>
+      ipcRenderer.invoke("proposals:create", projectId, input),
+    accept: (projectId: string, id: string, force?: boolean) =>
+      ipcRenderer.invoke("proposals:accept", projectId, id, force),
+    reject: (projectId: string, id: string) => ipcRenderer.invoke("proposals:reject", projectId, id),
+    currentOf: (projectId: string, id: string) => ipcRenderer.invoke("proposals:currentOf", projectId, id)
+  },
+  app: {
+    openConfig: (kind: "models" | "settings") => ipcRenderer.invoke("app:openConfig", kind),
+    onFocus: (cb: () => void) => subscribe("app:focus", cb)
   }
 };
 

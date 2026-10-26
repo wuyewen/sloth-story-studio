@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ChapterMeta, NovelProject } from "../../shared/types.js";
+import { shell } from "electron";
+import type { ChapterMeta, MemoryFileInfo, MemoryVersion, NovelProject, UnitMeta, WorkflowRunRecord, WorkflowSlot } from "../../shared/types.js";
 import { newId, readSettings } from "./store.js";
 
 function novelDir(): string {
@@ -9,6 +10,10 @@ function novelDir(): string {
   const dir = settings.novelDir || path.join(os.homedir(), "Documents", "SlothStories");
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+export function novelDirPath(): string {
+  return novelDir();
 }
 
 function sanitizeName(name: string): string {
@@ -23,6 +28,231 @@ interface MetaFile {
   createdAt: number;
   updatedAt: number;
   chapters: ChapterMeta[];
+  units?: UnitMeta[];
+  workflowIds?: string[];
+  workflowSlots?: Partial<Record<WorkflowSlot, string>>;
+}
+
+// ---- 项目级共享记忆 ----
+
+const MEMORY_DIR = "memory";
+
+// 默认记忆文件已取消：新项目 memory/ 为空目录，由用户/提案自行创建
+const MEMORY_DEFAULTS: Record<string, string> = {};
+
+// 旧版默认占位文件（内容未被改过的才清理，用户写过的保留）
+const LEGACY_DEFAULTS: Record<string, string> = {
+  "story-bible.md": "# 全书核心设定\n",
+  "system-design.md": "# 系统设计\n",
+  "world-bible.md": "# 世界观设定\n",
+  "master-outline.md": "# 全书大纲\n",
+  "style-guide.md": "# 风格规范\n",
+  "character-state.md": "# 角色状态\n",
+  "foreshadowing-tracker.md": "# 伏笔追踪表\n",
+  "material-library.md": "# 素材库\n"
+};
+
+const MEMORY_SUBDIRS = [
+  "memory/unit-summaries",
+  "memory/handoffs",
+  "reviews",
+  "workflow-runs",
+  "memory-proposals/pending",
+  "memory-proposals/applied"
+];
+
+// 初始化记忆目录：幂等、绝不覆盖已有文件
+export function initMemory(projectId: string): void {
+  const root = projectDirOf(projectId);
+  const memDir = path.join(root, MEMORY_DIR);
+  fs.mkdirSync(memDir, { recursive: true });
+  for (const sub of MEMORY_SUBDIRS) {
+    fs.mkdirSync(path.join(root, sub), { recursive: true });
+  }
+  for (const [name, content] of Object.entries(MEMORY_DEFAULTS)) {
+    const file = path.join(memDir, name);
+    if (!fs.existsSync(file)) fs.writeFileSync(file, content, "utf-8");
+  }
+  // 清理旧版默认占位文件（仅限内容未被用户修改过的）
+  for (const [name, content] of Object.entries(LEGACY_DEFAULTS)) {
+    const file = path.join(memDir, name);
+    if (fs.existsSync(file) && fs.readFileSync(file, "utf-8") === content) {
+      fs.rmSync(file);
+    }
+  }
+}
+
+// 校验并解析 memory/ 内的相对路径，拒绝路径穿越
+function resolveMemoryPath(projectId: string, rel: string): string {
+  const memDir = path.join(projectDirOf(projectId), MEMORY_DIR);
+  if (!rel || rel.includes("\0") || path.isAbsolute(rel)) throw new Error("非法路径");
+  const resolved = path.resolve(memDir, rel);
+  const prefix = memDir.endsWith(path.sep) ? memDir : memDir + path.sep;
+  if (resolved !== memDir && !resolved.startsWith(prefix)) throw new Error("非法路径：越出记忆目录");
+  return resolved;
+}
+
+export function memoryList(projectId: string): MemoryFileInfo[] {
+  initMemory(projectId);
+  const memDir = path.join(projectDirOf(projectId), MEMORY_DIR);
+  const out: MemoryFileInfo[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile() && entry.name.endsWith(".md")) {
+        const stat = fs.statSync(full);
+        out.push({ rel: path.relative(memDir, full), size: stat.size, updatedAt: stat.mtimeMs });
+      }
+    }
+  };
+  walk(memDir);
+  out.sort((a, b) => a.rel.localeCompare(b.rel));
+  return out;
+}
+
+export function memoryRead(projectId: string, rel: string): string {
+  const file = resolveMemoryPath(projectId, rel);
+  if (!fs.existsSync(file)) return "";
+  return fs.readFileSync(file, "utf-8");
+}
+
+export function memoryWrite(projectId: string, rel: string, content: string): void {
+  const file = resolveMemoryPath(projectId, rel);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // 写入前快照旧版本（最多保留 10 份）
+  if (fs.existsSync(file)) {
+    const prev = fs.readFileSync(file, "utf-8");
+    if (prev !== content) snapshotMemory(projectId, rel, prev);
+  }
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, content, "utf-8");
+  fs.renameSync(tmp, file);
+}
+
+export function memoryDelete(projectId: string, rel: string): void {
+  const file = resolveMemoryPath(projectId, rel);
+  fs.rmSync(file, { force: true });
+}
+
+// ---- 记忆版本历史 ----
+
+const HISTORY_KEEP = 10;
+
+function historyDir(projectId: string): string {
+  const dir = path.join(projectDirOf(projectId), MEMORY_DIR, ".history");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function historyName(rel: string, ts: number): string {
+  return `${rel.replace(/[/\\]/g, "__")}.${ts}.md`;
+}
+
+function snapshotMemory(projectId: string, rel: string, content: string): void {
+  const dir = historyDir(projectId);
+  const prefix = `${rel.replace(/[/\\]/g, "__")}.`;
+  fs.writeFileSync(path.join(dir, historyName(rel, Date.now())), content, "utf-8");
+  const versions = fs
+    .readdirSync(dir)
+    .filter((f) => f.startsWith(prefix) && f.endsWith(".md"))
+    .sort();
+  while (versions.length > HISTORY_KEEP) {
+    fs.rmSync(path.join(dir, versions.shift() as string), { force: true });
+  }
+}
+
+export function memoryHistory(projectId: string, rel: string): MemoryVersion[] {
+  const dir = historyDir(projectId);
+  const prefix = `${rel.replace(/[/\\]/g, "__")}.`;
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.startsWith(prefix) && f.endsWith(".md"))
+    .map((f) => {
+      const ts = Number(f.slice(prefix.length, -3));
+      const stat = fs.statSync(path.join(dir, f));
+      return { ts, size: stat.size };
+    })
+    .filter((v) => Number.isFinite(v.ts))
+    .sort((a, b) => b.ts - a.ts);
+}
+
+export function memoryReadVersion(projectId: string, rel: string, ts: number): string {
+  const file = path.join(historyDir(projectId), historyName(rel, ts));
+  if (!fs.existsSync(file)) throw new Error("版本不存在");
+  return fs.readFileSync(file, "utf-8");
+}
+
+export function memoryRestore(projectId: string, rel: string, ts: number): void {
+  const content = memoryReadVersion(projectId, rel, ts);
+  memoryWrite(projectId, rel, content);
+}
+
+// ---- 工作流运行历史 ----
+
+// 把每次运行的最终输出存成可读 Markdown 产物，返回项目内相对路径
+export function writeRunArtifact(
+  projectId: string,
+  workflowName: string,
+  startedAt: number,
+  finalOutput: string,
+  status: string,
+  error?: string
+): string | null {
+  if (!finalOutput.trim()) return null;
+  const dir = path.join(projectDirOf(projectId), "workflow-runs");
+  fs.mkdirSync(dir, { recursive: true });
+  const d = new Date(startedAt);
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}${String(d.getSeconds()).padStart(2, "0")}`;
+  const safeName = sanitizeName(workflowName).slice(0, 40);
+  const rel = path.join("workflow-runs", `${stamp}-${safeName}.md`);
+  const body = [
+    `# ${workflowName}`,
+    "",
+    `- 时间：${d.toLocaleString()}`,
+    `- 状态：${status === "done" ? "运行完成" : status === "stopped" ? "已停止" : "失败"}`,
+    ...(error ? [`- 错误：${error}`] : []),
+    "",
+    "---",
+    "",
+    finalOutput
+  ].join("\n");
+  const file = path.join(projectDirOf(projectId), rel);
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, body, "utf-8");
+  fs.renameSync(tmp, file);
+  return rel;
+}
+
+export function writeRunRecord(projectId: string, record: WorkflowRunRecord): void {
+  const dir = path.join(projectDirOf(projectId), "workflow-runs");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${record.runId}.json`);
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(record, null, 2), "utf-8");
+  fs.renameSync(tmp, file);
+}
+
+export function runHistory(projectId: string): WorkflowRunRecord[] {
+  const dir = path.join(projectDirOf(projectId), "workflow-runs");
+  if (!fs.existsSync(dir)) return [];
+  const out: WorkflowRunRecord[] = [];
+  for (const entry of fs.readdirSync(dir)) {
+    if (!entry.endsWith(".json")) continue;
+    try {
+      out.push(JSON.parse(fs.readFileSync(path.join(dir, entry), "utf-8")) as WorkflowRunRecord);
+    } catch {
+      // 跳过损坏的记录
+    }
+  }
+  out.sort((a, b) => b.startedAt - a.startedAt);
+  return out.slice(0, 50);
+}
+
+export function revealArtifact(projectId: string, rel: string): void {
+  if (rel.includes("..") || path.isAbsolute(rel)) throw new Error("非法路径");
+  shell.showItemInFolder(path.join(projectDirOf(projectId), rel));
 }
 
 function metaPath(projectId: string): string {
@@ -31,12 +261,41 @@ function metaPath(projectId: string): string {
 
 function readMeta(projectId: string): MetaFile {
   const raw = fs.readFileSync(metaPath(projectId), "utf-8");
-  return JSON.parse(raw) as MetaFile;
+  const meta = JSON.parse(raw) as MetaFile;
+  // 老项目迁移：无 units 时全部章节归入「第 1 单元」
+  if (!meta.units || meta.units.length === 0) {
+    meta.units = [
+      {
+        id: newId(),
+        title: "第 1 单元",
+        chapterIds: meta.chapters.map((c) => c.id)
+      }
+    ];
+  }
+  return meta;
+}
+
+// 章节归属一致性：新章节归入最后一个单元；被删除的章节从 units 中清除
+function normalizeUnits(meta: MetaFile): void {
+  const units = meta.units ?? [];
+  const chapterIds = new Set(meta.chapters.map((c) => c.id));
+  for (const u of units) u.chapterIds = u.chapterIds.filter((id) => chapterIds.has(id));
+  const assigned = new Set(units.flatMap((u) => u.chapterIds));
+  const last = units[units.length - 1];
+  if (last) {
+    for (const c of meta.chapters) {
+      if (!assigned.has(c.id)) last.chapterIds.push(c.id);
+    }
+  }
 }
 
 function writeMeta(meta: MetaFile): void {
+  normalizeUnits(meta);
   meta.updatedAt = Date.now();
-  fs.writeFileSync(metaPath(meta.id), JSON.stringify(meta, null, 2), "utf-8");
+  const file = metaPath(meta.id);
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(meta, null, 2), "utf-8");
+  fs.renameSync(tmp, file);
 }
 
 function countWords(text: string): number {
@@ -56,7 +315,14 @@ export function list(): NovelProject[] {
     if (!fs.existsSync(metaFile)) continue;
     try {
       const meta = JSON.parse(fs.readFileSync(metaFile, "utf-8")) as MetaFile;
-      out.push({ ...meta, id: entry.name });
+      if (!meta.units || meta.units.length === 0) {
+        // 老项目懒迁移
+        meta.units = [
+          { id: newId(), title: "第 1 单元", chapterIds: meta.chapters.map((c) => c.id) }
+        ];
+      }
+      out.push({ ...meta, id: entry.name, units: meta.units, workflowIds: meta.workflowIds ?? [] });
+      initMemory(entry.name);
     } catch {
       // 跳过损坏的项目
     }
@@ -82,15 +348,63 @@ export function create(title: string, synopsis: string): NovelProject[] {
     synopsis,
     createdAt: now,
     updatedAt: now,
-    chapters: []
+    chapters: [],
+    units: [{ id: newId(), title: "第 1 单元", chapterIds: [] }]
   };
   fs.writeFileSync(metaPath(dirName), JSON.stringify(meta, null, 2), "utf-8");
+  initMemory(dirName);
   return list();
 }
 
 export function rename(id: string, title: string): NovelProject[] {
   const meta = readMeta(id);
   meta.title = title.trim() || meta.title;
+  writeMeta(meta);
+  return list();
+}
+
+export function updateMeta(id: string, patch: { title?: string; synopsis?: string }): NovelProject[] {
+  const meta = readMeta(id);
+  if (patch.title !== undefined) meta.title = patch.title.trim() || meta.title;
+  if (patch.synopsis !== undefined) meta.synopsis = patch.synopsis;
+  writeMeta(meta);
+  return list();
+}
+
+// ---- 项目 ↔ 工作流关联 ----
+
+export function assignWorkflow(projectId: string, workflowId: string): NovelProject[] {
+  const meta = readMeta(projectId);
+  const ids = meta.workflowIds ?? [];
+  if (!ids.includes(workflowId)) {
+    meta.workflowIds = [...ids, workflowId];
+    writeMeta(meta);
+  }
+  return list();
+}
+
+export function unassignWorkflow(projectId: string, workflowId: string): NovelProject[] {
+  const meta = readMeta(projectId);
+  meta.workflowIds = (meta.workflowIds ?? []).filter((id) => id !== workflowId);
+  if (meta.workflowSlots) {
+    for (const [slot, id] of Object.entries(meta.workflowSlots)) {
+      if (id === workflowId) delete meta.workflowSlots[slot as keyof typeof meta.workflowSlots];
+    }
+  }
+  writeMeta(meta);
+  return list();
+}
+
+export function setWorkflowSlot(projectId: string, slot: string, workflowId: string | null): NovelProject[] {
+  const meta = readMeta(projectId);
+  const slots = { ...(meta.workflowSlots ?? {}) } as Record<string, string>;
+  if (workflowId) {
+    if (!(meta.workflowIds ?? []).includes(workflowId)) throw new Error("该工作流未关联到本项目");
+    slots[slot] = workflowId;
+  } else {
+    delete slots[slot];
+  }
+  meta.workflowSlots = slots as MetaFile["workflowSlots"];
   writeMeta(meta);
   return list();
 }
@@ -156,4 +470,40 @@ export function writeChapter(projectId: string, chapterId: string, content: stri
   chapter.words = countWords(content);
   chapter.updatedAt = Date.now();
   writeMeta(meta);
+}
+
+// ---- 单元（故事单元 / 卷）----
+
+export function createUnit(projectId: string, title: string): NovelProject[] {
+  const meta = readMeta(projectId);
+  const units = meta.units ?? [];
+  units.push({
+    id: newId(),
+    title: title.trim() || `第 ${units.length + 1} 单元`,
+    chapterIds: []
+  });
+  meta.units = units;
+  writeMeta(meta);
+  return list();
+}
+
+export function renameUnit(projectId: string, unitId: string, title: string): NovelProject[] {
+  const meta = readMeta(projectId);
+  const unit = meta.units?.find((u) => u.id === unitId);
+  if (!unit) throw new Error("单元不存在");
+  unit.title = title.trim() || unit.title;
+  writeMeta(meta);
+  return list();
+}
+
+export function setChapterUnit(projectId: string, chapterId: string, unitId: string): NovelProject[] {
+  const meta = readMeta(projectId);
+  findChapter(meta, chapterId);
+  const units = meta.units ?? [];
+  const target = units.find((u) => u.id === unitId);
+  if (!target) throw new Error("单元不存在");
+  for (const u of units) u.chapterIds = u.chapterIds.filter((id) => id !== chapterId);
+  target.chapterIds.push(chapterId);
+  writeMeta(meta);
+  return list();
 }

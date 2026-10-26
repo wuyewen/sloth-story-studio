@@ -58,6 +58,10 @@ export function openMainWindow(): BrowserWindow {
   win.on("closed", () => {
     if (mainWindow === win) mainWindow = null;
   });
+  // 窗口重新聚焦时通知渲染层刷新数据（外部修改 workflows.json 等文件后可见）
+  win.on("focus", () => {
+    if (!win.isDestroyed()) win.webContents.send("app:focus");
+  });
 
   loadRenderer(win, "/app");
   mainWindow = win;

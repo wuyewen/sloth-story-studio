@@ -10,6 +10,8 @@ import type {
   WorkflowRunEvent
 } from "../../shared/types.js";
 import { chat } from "./llmClient.js";
+import * as novelFs from "./novelFs.js";
+import * as proposals from "./proposals.js";
 
 export type GetKey = (providerId: string) => string;
 
@@ -47,14 +49,76 @@ function interpolate(
   template: string,
   input: string,
   outputs: Map<string, string>,
-  labelToId?: Map<string, string>
+  labelToId?: Map<string, string>,
+  memory?: Map<string, string>
 ): string {
   return template
     .replace(/\{\{\s*input\s*\}\}/g, input)
     .replace(/\{\{\s*nodes\.([^.]+?)\.output\s*\}\}/g, (_m, key: string) => {
       const k = key.trim();
       return outputs.get(k) ?? outputs.get(labelToId?.get(k) ?? "") ?? "";
-    });
+    })
+    .replace(/\{\{\s*memory\.(.+?)\s*\}\}/g, (_m, key: string) => memory?.get(key.trim()) ?? "");
+}
+
+// 扫描模板中的 {{memory.xxx}} 引用（xxx 为 memory/ 下的相对路径，可不带 .md）
+const MEMORY_REF_RE = /\{\{\s*memory\.(.+?)\s*\}\}/g;
+
+// 解析 autoProposal 节点的输出为结构化提案并创建到待审核（不自动应用）
+interface RawProposal {
+  targetFile?: string;
+  summary?: string;
+  reason?: string;
+  content?: string;
+  proposedContent?: string;
+}
+
+function createProposalsFromOutput(projectId: string, output: string): { created: number; error?: string } {
+  const trimmed = output.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  let text = fenced ? fenced[1] : trimmed;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // 宽容提取：从混合文本中截取第一个 [ 到最后一个 ] 再解析
+    const start = text.indexOf("[");
+    const end = text.lastIndexOf("]");
+    if (start >= 0 && end > start) {
+      try {
+        parsed = JSON.parse(text.slice(start, end + 1));
+      } catch {
+        return { created: 0, error: "提案节点输出不是可解析的 JSON 数组" };
+      }
+    } else {
+      return { created: 0, error: "提案节点输出不是可解析的 JSON 数组" };
+    }
+  }
+  const items: RawProposal[] = Array.isArray(parsed)
+    ? (parsed as RawProposal[])
+    : Array.isArray((parsed as { proposals?: RawProposal[] }).proposals)
+      ? (parsed as { proposals: RawProposal[] }).proposals
+      : [];
+  if (items.length === 0) return { created: 0, error: "提案 JSON 为空或结构不符" };
+  let created = 0;
+  for (const item of items) {
+    if (!item || typeof item.targetFile !== "string") continue;
+    const content = item.proposedContent ?? item.content;
+    if (typeof content !== "string" || !content.trim()) continue;
+    const targetFile = item.targetFile.endsWith(".md") ? item.targetFile : `${item.targetFile}.md`;
+    try {
+      proposals.create(projectId, {
+        targetFile,
+        summary: (item.summary ?? "工作流记忆更新提案").slice(0, 120),
+        reason: (item.reason ?? "").slice(0, 500),
+        proposedContent: content
+      });
+      created++;
+    } catch {
+      // 单条失败不阻塞其余提案
+    }
+  }
+  return created > 0 ? { created } : { created: 0, error: "提案条目缺少 targetFile 或 content" };
 }
 
 function pickProvider(providers: ModelProvider[], preferredId?: string | null): ModelProvider {
@@ -74,8 +138,9 @@ export async function run(
   agents: AgentProfile[],
   providers: ModelProvider[],
   getKey: GetKey,
-  input: string
-): Promise<{ finalOutput?: string; error?: string }> {
+  input: string,
+  projectId?: string
+): Promise<{ finalOutput?: string; error?: string; proposalsCreated?: number }> {
   const state = { stopped: false, controller: null as AbortController | null };
   running.set(runId, state);
 
@@ -94,11 +159,42 @@ export async function run(
 
   const nodeById = new Map<string, WorkflowNode>(workflow.nodes.map((n) => [n.id, n]));
   const outEdges = new Map<string, WorkflowEdge[]>();
+  const inEdges = new Map<string, string[]>();
   for (const edge of workflow.edges) {
     const list = outEdges.get(edge.source) ?? [];
     list.push(edge);
     outEdges.set(edge.source, list);
+    const ins = inEdges.get(edge.target) ?? [];
+    ins.push(edge.source);
+    inEdges.set(edge.target, ins);
   }
+
+  // 每个节点的下游可达集合（用于识别循环回边：目标能到达的父节点 = 环上的父节点，汇合等待时不算它）
+  const reachableCache = new Map<string, Set<string>>();
+  const reachableFrom = (id: string): Set<string> => {
+    const cached = reachableCache.get(id);
+    if (cached) return cached;
+    const seen = new Set<string>();
+    const stack = [...(outEdges.get(id) ?? []).map((e) => e.target)];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      for (const e of outEdges.get(cur) ?? []) stack.push(e.target);
+    }
+    reachableCache.set(id, seen);
+    return seen;
+  };
+
+  // 汇合（join）语义：多入边节点等所有非循环父节点「结算」（完成或条件不满足）后才执行一次
+  const settledBy = new Map<string, Set<string>>();
+  const markSettled = (targetId: string, parentId: string): void => {
+    const s = settledBy.get(targetId) ?? new Set<string>();
+    s.add(parentId);
+    settledBy.set(targetId, s);
+  };
+  // 正在执行中的节点：并行分支未跑完时，汇合点要等待，不能提前触发
+  const inFlight = new Set<string>();
 
   const outputs = new Map<string, string>();
   const visits = new Map<string, number>();
@@ -106,9 +202,64 @@ export async function run(
   for (const n of workflow.nodes) {
     if (n.data.label && !labelToId.has(n.data.label)) labelToId.set(n.data.label, n.id);
   }
+  // 兜底：agent 节点也可用所绑 Agent 的名字引用（如 {{nodes.小说写手.output}}）
+  for (const n of workflow.nodes) {
+    if (n.data.kind !== "agent" || !n.data.agentId) continue;
+    const agent = agents.find((a) => a.id === n.data.agentId);
+    if (agent && !labelToId.has(agent.name)) labelToId.set(agent.name, n.id);
+  }
   const context: Record<string, unknown> = { input, outputs };
+  const visitsCtx: Record<string, number> = {}; // 节点执行次数（按 id 和 label 双键），条件表达式可用 context.visits['节点名']
+  context.visits = visitsCtx;
   let steps = 0;
   let endOutput: string | undefined;
+  let proposalsCreated = 0;
+  let proposalsError: string | undefined;
+  const startedAt = Date.now();
+  const memoryRefs: string[] = [];
+
+  // 记忆快照：运行前扫描所有节点模板里的 {{memory.xxx}}，一次性从项目目录读入
+  const memory = new Map<string, string>();
+  if (projectId) {
+    const refs = new Set<string>();
+    for (const n of workflow.nodes) {
+      for (const tpl of [n.data.template, n.data.contextTemplate]) {
+        if (!tpl) continue;
+        for (const m of tpl.matchAll(MEMORY_REF_RE)) refs.add(m[1].trim());
+      }
+    }
+    for (const ref of refs) {
+      const rel = ref.endsWith(".md") ? ref : `${ref}.md`;
+      try {
+        memory.set(ref, novelFs.memoryRead(projectId, rel));
+        memoryRefs.push(rel);
+      } catch {
+        memory.set(ref, "");
+      }
+    }
+  }
+
+  // 项目内运行时落盘运行记录（不含任何密钥信息）
+  const writeRecord = (status: "done" | "error" | "stopped", error?: string): void => {
+    if (!projectId) return;
+    const final = endOutput ?? [...outputs.values()].pop() ?? "";
+    const artifactRel = novelFs.writeRunArtifact(projectId, workflow.name, startedAt, final, status, error);
+    novelFs.writeRunRecord(projectId, {
+      runId,
+      workflowId: workflow.id,
+      workflowName: workflow.name,
+      projectId,
+      startedAt,
+      endedAt: Date.now(),
+      status,
+      ...(error ? { error } : {}),
+      steps,
+      memoryRefs,
+      outputPreview: final.slice(0, 200),
+      finalOutput: final,
+      ...(artifactRel ? { artifactPath: artifactRel } : {})
+    });
+  };
 
   const emit = (ev: Omit<WorkflowRunEvent, "runId">): void => sendEvent(webContents, { runId, ...ev });
 
@@ -124,6 +275,8 @@ export async function run(
         typeof node.data.maxVisits === "number" && node.data.maxVisits > 0 ? node.data.maxVisits : 3;
       const seen = (visits.get(node.id) ?? 0) + 1;
       visits.set(node.id, seen);
+      visitsCtx[node.id] = seen;
+      if (node.data.label) visitsCtx[node.data.label] = seen;
       if (seen > maxVisits) {
         throw new Error(
           `节点「${node.data.label}」已执行 ${maxVisits} 次（达到重试上限），流程终止。可在节点上调整「最多执行次数」。`
@@ -131,10 +284,12 @@ export async function run(
       }
     }
     emit({ type: "node-start", nodeId: node.id, label: node.data.label });
+    inFlight.add(node.id);
 
     let output = "";
     try {
       if (kind === "note") {
+        inFlight.delete(node.id);
         emit({ type: "node-done", nodeId: node.id, label: node.data.label, outputPreview: "" });
         return;
       } else if (kind === "start") {
@@ -142,10 +297,14 @@ export async function run(
       } else if (kind === "agent") {
         const agent = agents.find((a) => a.id === node.data.agentId);
         if (!agent) throw new Error(`节点「${node.data.label}」未绑定有效的 Agent`);
-        const provider = pickProvider(providers, agent.providerId);
+        // 模型优先级：工作流指定 > Agent 绑定 > 第一个启用的模型
+        const wfProvider = workflow.providerId
+          ? providers.find((p) => p.id === workflow.providerId) ?? null
+          : null;
+        const provider = wfProvider ?? pickProvider(providers, agent.providerId);
         const custom = node.data.contextTemplate?.trim();
         const userContent = custom
-          ? interpolate(custom, input, outputs, labelToId)
+          ? interpolate(custom, input, outputs, labelToId, memory)
           : upstreamOutput || input;
         const messages: ChatMessage[] = [
           { role: "system", content: agent.systemPrompt },
@@ -153,13 +312,20 @@ export async function run(
         ];
         output = await callChat(provider, messages, { temperature: agent.temperature });
       } else if (kind === "prompt") {
-        const provider = pickProvider(providers, null);
-        const text = interpolate(node.data.template ?? "", input, outputs, labelToId);
+        const provider = (workflow.providerId ? providers.find((p) => p.id === workflow.providerId) : null) ?? pickProvider(providers, null);
+        const text = interpolate(node.data.template ?? "", input, outputs, labelToId, memory);
         output = await callChat(provider, [{ role: "user", content: text }]);
       } else if (kind === "end") {
         output = upstreamOutput;
         outputs.set(node.id, output);
         endOutput = output;
+        // 结束节点也可自动转提案（用最终输出解析）
+        if (node.data.autoProposal && projectId && output.trim()) {
+          const res = createProposalsFromOutput(projectId, output);
+          proposalsCreated += res.created;
+          if (res.error) proposalsError = res.error;
+        }
+        inFlight.delete(node.id);
         emit({
           type: "node-done",
           nodeId: node.id,
@@ -171,6 +337,7 @@ export async function run(
         output = upstreamOutput;
       }
     } catch (err) {
+      inFlight.delete(node.id);
       if (state.stopped) return;
       const message = err instanceof Error ? err.message : String(err);
       emit({ type: "node-error", nodeId: node.id, label: node.data.label, error: message });
@@ -178,31 +345,50 @@ export async function run(
     }
 
     outputs.set(node.id, output);
+    inFlight.delete(node.id);
     emit({
       type: "node-done",
       nodeId: node.id,
       label: node.data.label,
-      outputPreview: output.slice(0, 200)
+      outputPreview: output.slice(0, 200),
+      output
     });
 
+    // autoProposal 节点：输出解析为结构化提案，自动创建到待审核（不自动应用）
+    if (node.data.autoProposal && projectId && output.trim()) {
+      const res = createProposalsFromOutput(projectId, output);
+      proposalsCreated += res.created;
+      if (res.error) proposalsError = res.error;
+    }
+
     const edges = outEdges.get(node.id) ?? [];
-    const nexts: WorkflowNode[] = [];
+    const taken: WorkflowNode[] = [];
     const seenTargets = new Set<string>();
     for (const edge of edges) {
-      const expr = edge.data?.conditionExpr;
-      if (expr) {
-        if (!evalCondition(expr, output, context)) continue;
-      }
-      if (seenTargets.has(edge.target)) continue;
-      seenTargets.add(edge.target);
       const target = nodeById.get(edge.target);
-      if (target) nexts.push(target);
+      if (!target || seenTargets.has(target.id)) continue;
+      seenTargets.add(target.id);
+      const expr = edge.data?.conditionExpr;
+      const pass = expr ? evalCondition(expr, output, context) : true;
+      // 无论条件是否满足，该父节点对此目标都算「已结算」（不满足 = 此分支不走）
+      markSettled(target.id, node.id);
+      if (pass) taken.push(target);
     }
-    if (nexts.length === 1) {
-      await runNode(nexts[0], output);
-    } else if (nexts.length > 1) {
+    const trigger = (t: WorkflowNode): Promise<void> => {
+      const parentsAll = inEdges.get(t.id) ?? [node.id];
+      if (parentsAll.length <= 1) return runNode(t, output);
+      const downstream = reachableFrom(t.id);
+      const required = parentsAll.filter((p) => !downstream.has(p));
+      const settled = settledBy.get(t.id);
+      const parentInFlight = parentsAll.some((p) => inFlight.has(p));
+      if (!parentInFlight && required.every((p) => settled?.has(p))) return runNode(t, output);
+      return Promise.resolve(); // 还有父节点在执行中或未结算，等待它们完成后再触发
+    };
+    if (taken.length === 1) {
+      await trigger(taken[0]);
+    } else if (taken.length > 1) {
       // 分支并行：多个下游同时执行，全部结束后才继续汇合；任一分支失败则整体失败
-      const results = await Promise.allSettled(nexts.map((n) => runNode(n, output)));
+      const results = await Promise.allSettled(taken.map((n) => trigger(n)));
       const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
       if (failed) throw failed.reason;
     }
@@ -213,14 +399,17 @@ export async function run(
     if (!start) throw new Error("工作流缺少 start 节点");
     await runNode(start, input);
     if (state.stopped) {
+      writeRecord("stopped", "已手动停止");
       emit({ type: "run-error", error: "已手动停止" });
       return { error: "已手动停止" };
     }
     const finalOutput = endOutput ?? [...outputs.values()].pop() ?? "";
+    writeRecord("done");
     emit({ type: "run-done", finalOutput });
-    return { finalOutput };
+    return { finalOutput, proposalsCreated, ...(proposalsError ? { proposalsError } : {}) };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
+    writeRecord("error", error);
     emit({ type: "run-error", error });
     return { error };
   } finally {
@@ -238,14 +427,15 @@ interface GeneratedWorkflow {
 const GENERATE_SYSTEM_PROMPT = `你是一个工作流设计助手。根据用户的需求描述，设计一个节点工作流，并且只输出一个 JSON 对象，不要输出任何其他文字或解释。
 
 JSON 格式：
-{"nodes":[{"id":"字符串","type":"start|agent|prompt|end|note","position":{"x":数字,"y":数字},"data":{"kind":"start|agent|prompt|end|note","label":"节点名称","agentId":null,"template":"prompt 节点的模板文本，可使用 {{input}} 与 {{nodes.<节点id>.output}} 插值"}}],"edges":[{"id":"字符串","source":"源节点id","target":"目标节点id","data":{"line":"bezier|step|straight","color":"#颜色","conditionExpr":"可选，以 output/context 求值的 JS 表达式"},"label":"可选"}]}
+{"nodes":[{"id":"字符串","type":"start|agent|prompt|end|note","position":{"x":数字,"y":数字},"data":{"kind":"start|agent|prompt|end|note","label":"节点名称","agentId":null,"template":"prompt 节点的模板文本，可使用 {{input}} 与 {{nodes.<节点id>.output}} 插值"}}],"edges":[{"id":"字符串","source":"源节点id","target":"目标节点id","data":{"line":"bezier|step|straight","color":"#颜色","conditionExpr":"可选，以 output/context 求值的 JS 表达式，context.visits['节点名'] 可取该节点已执行次数（用于返修上限优雅退出）"},"label":"可选"}]}
 
 规则：
 - 必须恰好有一个 start 节点和至少一个 end 节点。
 - agent 节点的 data.agentId 一律填 null，由用户在画布上指定。
 - type 与 data.kind 必须一致。
 - 节点 data.label 应起有意义的名称（如「写手」「审核」），其他节点可用 {{nodes.名称.output}} 引用它的输出。
-- agent 节点可通过 data.contextTemplate 自定义上下文（支持 {{input}} 与 {{nodes.名称.output}} 插值），用于把非直接上游的内容带进来；不需要时省略该字段。
+- agent 节点可通过 data.contextTemplate 自定义上下文（支持 {{input}}、{{nodes.名称.output}}、{{memory.记忆文件名}} 插值），用于把非直接上游的内容带进来；不需要时省略该字段。
+- 一个节点可以有多个入边：它会等所有非循环父节点都完成后才执行一次（并行分支的汇合），用 contextTemplate 引用各父节点输出。
 - 只输出 JSON，不要 markdown 代码围栏。`;
 
 function stripCodeFence(text: string): string {
@@ -356,14 +546,15 @@ export async function generate(
 const OPTIMIZE_SYSTEM_PROMPT = `你是一个工作流优化助手。用户会给你一个已有的工作流 JSON 和一段优化需求。请在理解现有结构的基础上输出调整后的完整工作流 JSON，不要输出任何其他文字或解释。
 
 JSON 格式与输入一致：
-{"nodes":[{"id":"字符串","type":"start|agent|prompt|end|note","position":{"x":数字,"y":数字},"data":{"kind":"...","label":"节点名称","agentId":"保持原值","template":"...","maxVisits":数字}}],"edges":[{"id":"字符串","source":"源节点id","target":"目标节点id","data":{"line":"bezier|step|straight","color":"#颜色","conditionExpr":"可选，以 output/context 求值的 JS 表达式"},"label":"可选"}]}
+{"nodes":[{"id":"字符串","type":"start|agent|prompt|end|note","position":{"x":数字,"y":数字},"data":{"kind":"...","label":"节点名称","agentId":"保持原值","template":"...","maxVisits":数字}}],"edges":[{"id":"字符串","source":"源节点id","target":"目标节点id","data":{"line":"bezier|step|straight","color":"#颜色","conditionExpr":"可选，以 output/context 求值的 JS 表达式，context.visits['节点名'] 可取该节点已执行次数（用于返修上限优雅退出）"},"label":"可选"}]}
 
 规则：
 - 保留用户已有的节点 id、agent 节点的 data.agentId 绑定和 maxVisits 设置，除非用户明确要求修改。
 - 必须保留恰好一个 start 节点和至少一个 end 节点。
 - type 与 data.kind 必须一致。
 - 节点 data.label 应起有意义的名称（如「写手」「审核」），其他节点可用 {{nodes.名称.output}} 引用它的输出。
-- agent 节点可通过 data.contextTemplate 自定义上下文（支持 {{input}} 与 {{nodes.名称.output}} 插值），用于把非直接上游的内容带进来；不需要时省略该字段。
+- agent 节点可通过 data.contextTemplate 自定义上下文（支持 {{input}}、{{nodes.名称.output}}、{{memory.记忆文件名}} 插值），用于把非直接上游的内容带进来；不需要时省略该字段。
+- 一个节点可以有多个入边：它会等所有非循环父节点都完成后才执行一次（并行分支的汇合），用 contextTemplate 引用各父节点输出。
 - 新增节点可以使用新的 id；position 可以复用或微调现有值。
 - 只输出 JSON，不要 markdown 代码围栏。`;
 

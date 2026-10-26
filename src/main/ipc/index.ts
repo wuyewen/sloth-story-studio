@@ -8,6 +8,7 @@ import type {
   ChatRequest,
   ModelProviderInfo,
   ModelProviderInput,
+  ProposalInput,
   WorkflowEdge,
   WorkflowInput,
   WorkflowNode
@@ -28,7 +29,9 @@ import {
 import { decryptKey, encryptKey } from "../services/crypto.js";
 import { abortStream, chat, chatStream } from "../services/llmClient.js";
 import * as novelFs from "../services/novelFs.js";
+import * as proposals from "../services/proposals.js";
 import * as workflowEngine from "../services/workflowEngine.js";
+import { openConfigWindow } from "../windows.js";
 
 function toInfo(record: ModelRecord): ModelProviderInfo {
   const { apiKeyEnc, ...rest } = record;
@@ -53,6 +56,10 @@ function broadcastModels(senderId: number, models: ModelProviderInfo[]): void {
 }
 
 export function registerIpc(): void {
+  ipcMain.handle("app:openConfig", (_e, kind: "models" | "settings") => {
+    openConfigWindow(kind);
+  });
+
   // ---- models ----
 
   ipcMain.handle("models:list", (): ModelProviderInfo[] => readModels().map(toInfo));
@@ -212,6 +219,22 @@ export function registerIpc(): void {
     novelFs.create(title, synopsis)
   );
   ipcMain.handle("novels:rename", (_e, id: string, title: string) => novelFs.rename(id, title));
+
+  ipcMain.handle("novels:updateMeta", (_e, id: string, patch: { title?: string; synopsis?: string }) =>
+    novelFs.updateMeta(id, patch)
+  );
+
+  ipcMain.handle("novels:assignWorkflow", (_e, projectId: string, workflowId: string) =>
+    novelFs.assignWorkflow(projectId, workflowId)
+  );
+
+  ipcMain.handle("novels:unassignWorkflow", (_e, projectId: string, workflowId: string) =>
+    novelFs.unassignWorkflow(projectId, workflowId)
+  );
+
+  ipcMain.handle("novels:setWorkflowSlot", (_e, projectId: string, slot: string, workflowId: string | null) =>
+    novelFs.setWorkflowSlot(projectId, slot, workflowId)
+  );
   ipcMain.handle("novels:remove", (_e, id: string) => novelFs.remove(id));
   ipcMain.handle("novels:createChapter", (_e, projectId: string, title: string) =>
     novelFs.createChapter(projectId, title)
@@ -226,6 +249,72 @@ export function registerIpc(): void {
     "novels:writeChapter",
     (_e, projectId: string, chapterId: string, content: string) =>
       novelFs.writeChapter(projectId, chapterId, content)
+  );
+
+  ipcMain.handle("novels:createUnit", (_e, projectId: string, title: string) =>
+    novelFs.createUnit(projectId, title)
+  );
+
+  ipcMain.handle("novels:renameUnit", (_e, projectId: string, unitId: string, title: string) =>
+    novelFs.renameUnit(projectId, unitId, title)
+  );
+
+  ipcMain.handle(
+    "novels:setChapterUnit",
+    (_e, projectId: string, chapterId: string, unitId: string) =>
+      novelFs.setChapterUnit(projectId, chapterId, unitId)
+  );
+
+  ipcMain.handle("novels:memoryList", (_e, projectId: string) => novelFs.memoryList(projectId));
+
+  ipcMain.handle("novels:memoryRead", (_e, projectId: string, rel: string) =>
+    novelFs.memoryRead(projectId, rel)
+  );
+
+  ipcMain.handle("novels:memoryWrite", (_e, projectId: string, rel: string, content: string) =>
+    novelFs.memoryWrite(projectId, rel, content)
+  );
+
+  ipcMain.handle("novels:memoryDelete", (_e, projectId: string, rel: string) =>
+    novelFs.memoryDelete(projectId, rel)
+  );
+
+  ipcMain.handle("novels:memoryHistory", (_e, projectId: string, rel: string) =>
+    novelFs.memoryHistory(projectId, rel)
+  );
+
+  ipcMain.handle("novels:memoryReadVersion", (_e, projectId: string, rel: string, ts: number) =>
+    novelFs.memoryReadVersion(projectId, rel, ts)
+  );
+
+  ipcMain.handle("novels:memoryRestore", (_e, projectId: string, rel: string, ts: number) =>
+    novelFs.memoryRestore(projectId, rel, ts)
+  );
+
+  ipcMain.handle("novels:runHistory", (_e, projectId: string) => novelFs.runHistory(projectId));
+
+  ipcMain.handle("novels:revealArtifact", (_e, projectId: string, rel: string) =>
+    novelFs.revealArtifact(projectId, rel)
+  );
+
+  // ---- 记忆提案 ----
+
+  ipcMain.handle("proposals:list", (_e, projectId: string) => proposals.list(projectId));
+
+  ipcMain.handle("proposals:create", (_e, projectId: string, input: ProposalInput) =>
+    proposals.create(projectId, input)
+  );
+
+  ipcMain.handle("proposals:accept", (_e, projectId: string, id: string, force?: boolean) =>
+    proposals.accept(projectId, id, force)
+  );
+
+  ipcMain.handle("proposals:reject", (_e, projectId: string, id: string) =>
+    proposals.reject(projectId, id)
+  );
+
+  ipcMain.handle("proposals:currentOf", (_e, projectId: string, id: string) =>
+    proposals.currentOf(projectId, id)
   );
 
   // ---- llm ----
@@ -322,8 +411,9 @@ export function registerIpc(): void {
       e: IpcMainInvokeEvent,
       runId: string,
       workflowId: string,
-      input: string
-    ): Promise<{ finalOutput?: string; error?: string }> => {
+      input: string,
+      projectId?: string
+    ): Promise<{ finalOutput?: string; error?: string; proposalsCreated?: number; proposalsError?: string }> => {
       const workflow = readWorkflows().find((w) => w.id === workflowId);
       if (!workflow) throw new Error("工作流不存在");
       return workflowEngine.run(
@@ -333,7 +423,8 @@ export function registerIpc(): void {
         readAgents(),
         readModels(),
         getKey,
-        input
+        input,
+        projectId
       );
     }
   );
