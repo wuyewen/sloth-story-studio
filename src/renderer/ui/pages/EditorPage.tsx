@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FilePlus2, FileText, Pencil, Plus, Trash2 } from "lucide-react";
+import { FilePlus2, FileText, FolderPlus, Pencil, Plus, Trash2 } from "lucide-react";
 import { sloth } from "../../api";
 import { useStudio } from "../../state/store";
 import { ConfirmDialog, Modal } from "../components/Modal";
@@ -22,6 +22,8 @@ export default function EditorPage({ query }: { query: string }) {
   const agents = useStudio((s) => s.agents);
   const workflows = useStudio((s) => s.workflows);
   const refreshProjects = useStudio((s) => s.refreshProjects);
+  const currentProjectId = useStudio((s) => s.currentProjectId);
+  const setCurrentProject = useStudio((s) => s.setCurrentProject);
 
   const [projectId, setProjectId] = useState<string | null>(null);
   const [chapterId, setChapterId] = useState<string | null>(null);
@@ -43,7 +45,7 @@ export default function EditorPage({ query }: { query: string }) {
   const contentRef = useRef(content);
   contentRef.current = content;
 
-  const project = projects.find((p) => p.id === projectId) ?? null;
+  const project = projects.find((p) => p.id === (projectId ?? currentProjectId)) ?? projects[0] ?? null;
   const chapter = project?.chapters.find((c) => c.id === chapterId) ?? null;
 
   const shownProjects = useMemo(
@@ -112,6 +114,7 @@ export default function EditorPage({ query }: { query: string }) {
     if (id === projectId) return;
     void flushRef.current();
     setProjectId(id);
+    setCurrentProject(id);
     setChapterId(null);
     setContent("");
   }
@@ -144,8 +147,15 @@ export default function EditorPage({ query }: { query: string }) {
     setDeletingProject(null);
   }
 
-  async function addChapter() {
+  async function addUnit() {
     if (!sloth || !projectId) return;
+    const title = window.prompt("新单元名称（如：第 2 单元 · 修仙篇）", `第 ${(project?.units.length ?? 0) + 1} 单元`);
+    if (!title?.trim()) return;
+    await sloth.novels.createUnit(projectId, title.trim());
+    await refreshProjects();
+  }
+
+  async function addChapter() {    if (!sloth || !projectId) return;
     const list = await sloth.novels.createChapter(projectId, `第 ${(project?.chapters.length ?? 0) + 1} 章`);
     await refreshProjects();
     const updated = list.find((p) => p.id === projectId);
@@ -257,18 +267,32 @@ export default function EditorPage({ query }: { query: string }) {
           <>
             <div className="chapter-bar">
               <div className="chapter-tabs">
-                {project.chapters.map((c) => (
-                  <button
-                    key={c.id}
-                    className={`chapter-tab ${c.id === chapterId ? "active" : ""}`}
-                    onClick={() => selectChapter(c.id)}
-                    title={`${c.words} 字`}
-                  >
-                    {c.title}
-                    <small>{c.words} 字</small>
-                  </button>
-                ))}
+                {(project.units ?? []).map((u) => {
+                  const unitChapters = u.chapterIds
+                    .map((id) => project.chapters.find((c) => c.id === id))
+                    .filter((c): c is NonNullable<typeof c> => Boolean(c));
+                  return (
+                    <div key={u.id} className="unit-group">
+                      <div className="unit-head">{u.title}</div>
+                      {unitChapters.map((c) => (
+                        <button
+                          key={c.id}
+                          className={`chapter-tab ${c.id === chapterId ? "active" : ""}`}
+                          onClick={() => selectChapter(c.id)}
+                          title={`${c.words} 字`}
+                        >
+                          {c.title}
+                          <small>{c.words} 字</small>
+                        </button>
+                      ))}
+                      {unitChapters.length === 0 && <div className="unit-empty">暂无章节</div>}
+                    </div>
+                  );
+                })}
               </div>
+              <button className="icon-button" title="新建单元" onClick={addUnit}>
+                <FolderPlus size={16} />
+              </button>
               <button className="icon-button" title="新建章节" onClick={addChapter}>
                 <FilePlus2 size={16} />
               </button>
@@ -329,7 +353,8 @@ export default function EditorPage({ query }: { query: string }) {
         <AiPanel
           providers={providers}
           agents={agents}
-          workflows={workflows}
+          workflows={project ? workflows.filter((w) => (project.workflowIds ?? []).includes(w.id)) : []}
+          projectId={project?.id ?? null}
           canEditChapter={!!chapter}
           onInsert={handleInsert}
         />

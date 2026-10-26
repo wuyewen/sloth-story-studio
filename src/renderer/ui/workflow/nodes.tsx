@@ -38,24 +38,44 @@ function NodeShell({
   );
 }
 
+function AutoProposalToggle({ id, data }: { id: string; data: WorkflowNodeData }) {
+  const { updateNodeData } = useReactFlow<WfNode>();
+  return (
+    <label
+      className="wf-node-limits nodrag"
+      title="开启后：本节点输出若为提案 JSON 数组，将自动创建到「待审核的记忆提案」（不自动应用）"
+    >
+      <input
+        type="checkbox"
+        checked={Boolean(data.autoProposal)}
+        onChange={(e) => updateNodeData(id, { autoProposal: e.target.checked })}
+      />
+      自动转提案
+    </label>
+  );
+}
+
 function MaxVisitsRow({ id, data }: { id: string; data: WorkflowNodeData }) {
   const { updateNodeData } = useReactFlow<WfNode>();
   const value = typeof data.maxVisits === "number" && data.maxVisits > 0 ? data.maxVisits : 3;
   return (
-    <label className="wf-node-limits nodrag" title="循环返回该节点时，单次运行最多执行的次数">
-      最多执行
-      <input
-        type="number"
-        min={1}
-        max={20}
-        value={value}
-        onChange={(e) => {
-          const n = Number(e.target.value);
-          if (Number.isFinite(n) && n >= 1) updateNodeData(id, { maxVisits: Math.min(20, Math.floor(n)) });
-        }}
-      />
-      次
-    </label>
+    <div className="wf-node-bottom nodrag">
+      <label className="wf-node-limits" title="循环返回该节点时，单次运行最多执行的次数">
+        最多执行
+        <input
+          type="number"
+          min={1}
+          max={20}
+          value={value}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            if (Number.isFinite(n) && n >= 1) updateNodeData(id, { maxVisits: Math.min(20, Math.floor(n)) });
+          }}
+        />
+        次
+      </label>
+      <AutoProposalToggle id={id} data={data} />
+    </div>
   );
 }
 
@@ -90,10 +110,11 @@ export function StartNode() {
   );
 }
 
-export function EndNode() {
+export function EndNode({ id, data }: NodeProps<WfNode>) {
   return (
     <NodeShell className="end-node" showSource={false}>
       <Flag size={13} /> 结束
+      <AutoProposalToggle id={id} data={data} />
     </NodeShell>
   );
 }
@@ -191,7 +212,7 @@ export function PromptNode({ id, data }: NodeProps<WfNode>) {
       </div>
       {editing ? (
         <textarea
-          className="nodrag wf-node-textarea"
+          className="nodrag nowheel wf-node-textarea"
           rows={4}
           autoFocus
           value={template}
@@ -221,7 +242,7 @@ export function NoteNode({ id, data }: NodeProps<WfNode>) {
       </div>
       {editing ? (
         <textarea
-          className="nodrag wf-node-textarea"
+          className="nodrag nowheel wf-node-textarea"
           rows={3}
           autoFocus
           value={data.label}

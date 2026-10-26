@@ -3,6 +3,7 @@ import {
   addEdge,
   Background,
   Controls,
+  MarkerType,
   ReactFlow,
   useEdgesState,
   useNodesState,
@@ -56,6 +57,7 @@ export default function Canvas({
 
   const [name, setName] = useState(workflow.name);
   const [description, setDescription] = useState(workflow.description);
+  const [wfProviderId, setWfProviderId] = useState(workflow.providerId ?? "");
   const [nodes, setNodes, onNodesChange] = useNodesState<WfNode>(
     workflow.nodes.map((n) => ({
       ...n,
@@ -132,6 +134,7 @@ export default function Canvas({
       id: workflow.id,
       name: name.trim() || "未命名工作流",
       description,
+      providerId: wfProviderId || null,
       nodes: nodes.map((n) => ({ id: n.id, type: n.type ?? "agent", position: n.position, data: n.data })),
       edges: edges.map((e) => ({
         id: e.id,
@@ -148,7 +151,7 @@ export default function Canvas({
     await sloth.workflows.save(input);
     await refreshWorkflows();
     setSaveState("saved");
-  }, [workflow.id, name, description, nodes, edges, refreshWorkflows, readOnly]);
+  }, [workflow.id, name, description, wfProviderId, nodes, edges, refreshWorkflows, readOnly]);
 
   const saveRef = useRef(save);
   saveRef.current = save;
@@ -162,7 +165,7 @@ export default function Canvas({
     setSaveState("dirty");
     const t = window.setTimeout(() => void saveRef.current(), 1500);
     return () => window.clearTimeout(t);
-  }, [nodes, edges, name, description]);
+  }, [nodes, edges, name, description, wfProviderId]);
 
   const onConnect = useCallback(
     (conn: Connection) =>
@@ -231,7 +234,7 @@ export default function Canvas({
     let maxDepth = 0;
     for (const d of depth.values()) maxDepth = Math.max(maxDepth, d);
 
-    // 列间距：默认 280，若相邻层之间的边带文字（标签/条件），按文字长度加宽
+    // 列间距：默认 280，若相邻层之间的边带文字（标签/条件），按「节点宽 + 文字宽 + 边距」加宽，保证文字完整展示
     const textWidth = (t: string): number =>
       [...t].reduce((w, c) => w + (c.charCodeAt(0) > 255 ? 12 : 7), 0);
     const edgeText = (e: WfEdge): string =>
@@ -242,7 +245,7 @@ export default function Canvas({
       let gap = 280;
       for (const e of edges) {
         if (depth.get(e.source) === d && depth.get(e.target) === d + 1) {
-          gap = Math.max(gap, 150 + textWidth(edgeText(e)));
+          gap = Math.max(gap, 260 + textWidth(edgeText(e)));
         }
       }
       xPos[d + 1] = xPos[d] + gap;
@@ -360,7 +363,13 @@ export default function Canvas({
         labelStyle: { fontSize: 10, whiteSpace: "nowrap" as const },
         labelBgStyle: { fill: "#fffefa", fillOpacity: 0.92 },
         labelBgPadding: [6, 3] as [number, number],
-        labelBgBorderRadius: 4
+        labelBgBorderRadius: 4,
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          width: 16,
+          height: 16,
+          color: (e.style?.stroke as string) ?? "#7D8796"
+        }
       })),
     [edges]
   );
@@ -434,6 +443,18 @@ export default function Canvas({
           onChange={(e) => setDescription(e.target.value)}
           placeholder="描述（可选）"
         />
+        <select
+          className="text-input wf-provider"
+          value={wfProviderId}
+          disabled={readOnly}
+          onChange={(e) => setWfProviderId(e.target.value)}
+          title="工作流级大模型：设置后优先于 Agent 绑定的模型"
+        >
+          <option value="">模型：跟随 Agent</option>
+          {providers.filter((p) => p.enabled).map((p) => (
+            <option key={p.id} value={p.id}>模型：{p.displayName}</option>
+          ))}
+        </select>
         {readOnly ? (
           <span className="badge-builtin wf-readonly-badge">内置 · 只读</span>
         ) : (

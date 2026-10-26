@@ -15,6 +15,7 @@ interface Props {
   providers: ModelProviderInfo[];
   agents: AgentProfile[];
   workflows: WorkflowDef[];
+  projectId: string | null; // 传给工作流运行，用于注入项目记忆 {{memory.xxx}}
   canEditChapter: boolean;
   onInsert: (text: string, mode: InsertMode) => void;
 }
@@ -47,9 +48,20 @@ function InsertBar({
   canEditChapter: boolean;
   onInsert: (text: string, mode: InsertMode) => void;
 }) {
+  const [copied, setCopied] = useState(false);
   if (!text.trim()) return null;
   return (
     <div className="insert-bar">
+      <button
+        className="ghost-button small"
+        onClick={() => {
+          void navigator.clipboard.writeText(text);
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        }}
+      >
+        {copied ? "已复制 ✓" : "一键复制"}
+      </button>
       <button className="ghost-button small" disabled={!canEditChapter} onClick={() => onInsert(text, "cursor")}>
         插入光标处
       </button>
@@ -63,7 +75,7 @@ function InsertBar({
   );
 }
 
-export default function AiPanel({ providers, agents, workflows, canEditChapter, onInsert }: Props) {
+export default function AiPanel({ providers, agents, workflows, projectId, canEditChapter, onInsert }: Props) {
   const [mode, setMode] = useState<Mode>("direct");
   const cleanups = useRef<(() => void)[]>([]);
 
@@ -241,7 +253,7 @@ export default function AiPanel({ providers, agents, workflows, canEditChapter, 
     });
     track(off);
     void sloth.workflows
-      .run(runId, effectiveWorkflow, wfInput.trim())
+      .run(runId, effectiveWorkflow, wfInput.trim(), projectId ?? undefined)
       .then((res) => {
         // 以返回值为最终完成依据，事件丢失也不会卡在运行中
         if (res?.error) setWfError(res.error);
@@ -388,7 +400,7 @@ export default function AiPanel({ providers, agents, workflows, canEditChapter, 
               ))}
             </select>
           </label>
-          {workflows.length === 0 && <p className="model-empty">还没有工作流，请到 Workflows 页创建。</p>}
+          {workflows.length === 0 && <p className="model-empty">这本书还没有关联工作流，请到左侧书名下的「工作流管理」中添加。</p>}
           <textarea
             className="text-input ai-prompt"
             rows={3}

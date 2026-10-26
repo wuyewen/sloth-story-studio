@@ -82,7 +82,7 @@ export default function WorkflowsPage() {
   }
 
   return (
-    <div>
+    <div className="agents-page">
       <div className="section-heading agents-head">
         <div>
           <h2>Workflows</h2>
@@ -98,6 +98,7 @@ export default function WorkflowsPage() {
         </div>
       </div>
 
+      <div className="agents-scroll">
       {workflows.length === 0 ? (
         <div className="empty-feature">
           <div className="feature-icon">
@@ -134,6 +135,7 @@ export default function WorkflowsPage() {
           ))}
         </div>
       )}
+      </div>
 
       {genOpen && (
         <Modal title="从描述生成工作流" onClose={() => !genLoading && setGenOpen(false)} width={520}>

@@ -15,6 +15,10 @@ interface StudioState {
   projects: NovelProject[];
   workflows: WorkflowDef[];
   settings: AppSettings | null;
+  currentProjectId: string | null; // 侧边栏选中的小说项目（树形导航）
+  workbenchMemoryOpen: boolean; // 「记忆管理」导航时自动打开记忆弹窗
+  setCurrentProject: (id: string | null) => void;
+  setWorkbenchMemoryOpen: (v: boolean) => void;
   init: () => Promise<void>;
   refreshProviders: () => Promise<void>;
   refreshAgents: () => Promise<void>;
@@ -30,6 +34,10 @@ export const useStudio = create<StudioState>((set, get) => ({
   projects: [],
   workflows: [],
   settings: null,
+  currentProjectId: null,
+  workbenchMemoryOpen: false,
+  setCurrentProject: (id) => set({ currentProjectId: id }),
+  setWorkbenchMemoryOpen: (v) => set({ workbenchMemoryOpen: v }),
 
   async init() {
     if (!sloth) {
@@ -52,6 +60,12 @@ export const useStudio = create<StudioState>((set, get) => ({
       void get().refreshProjects();
     });
     sloth.models.onChanged((next) => set({ providers: next }));
+    sloth.app.onFocus(() => {
+      // 窗口重新聚焦：外部可能改过 workflows/agents/项目文件，全部刷新
+      void get().refreshWorkflows();
+      void get().refreshAgents();
+      void get().refreshProjects();
+    });
   },
 
   async refreshProviders() {

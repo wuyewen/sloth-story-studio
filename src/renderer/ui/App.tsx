@@ -1,24 +1,26 @@
 import { useEffect, useState } from "react";
-import { BookOpen, Sparkles, Workflow, Search, ChevronRight } from "lucide-react";
+import { BookOpen, Sparkles, Workflow, Search, ChevronRight, SlidersHorizontal } from "lucide-react";
 import { sloth } from "../api";
 import { useStudio } from "../state/store";
 import { BridgeMissing } from "./components/Modal";
 import EditorPage from "./pages/EditorPage";
 import AgentsPage from "./pages/AgentsPage";
 import WorkflowsPage from "./pages/WorkflowsPage";
+import WorkbenchPage from "./pages/WorkbenchPage";
+import ProjectSettingsPage from "./pages/ProjectSettingsPage";
+import ProjectWorkflowsPage from "./pages/ProjectWorkflowsPage";
+import HomePage from "./pages/HomePage";
 
-type Page = "editor" | "agents" | "workflows";
-
-const nav: { id: Page; label: string; icon: typeof BookOpen }[] = [
-  { id: "editor", label: "小说编辑器", icon: BookOpen },
-  { id: "agents", label: "Agents", icon: Sparkles },
-  { id: "workflows", label: "Workflows", icon: Workflow }
-];
+type Page = "home" | "workbench" | "editor" | "agents" | "workflows" | "project-settings" | "project-workflows";
 
 const pageTitle: Record<Page, string> = {
-  editor: "小说编辑器",
-  agents: "Agents",
-  workflows: "Workflows"
+  home: "首页",
+  workbench: "创作工作台",
+  editor: "章节编辑器",
+  agents: "智能体",
+  workflows: "工作流",
+  "project-settings": "项目设置",
+  "project-workflows": "工作流管理"
 };
 
 function Brand() {
@@ -31,20 +33,47 @@ function Brand() {
 }
 
 export default function App() {
-  const [page, setPage] = useState<Page>("editor");
+  const [page, setPage] = useState<Page>("home");
   const [query, setQuery] = useState("");
   const ready = useStudio((s) => s.ready);
   const settings = useStudio((s) => s.settings);
   const init = useStudio((s) => s.init);
+  const projects = useStudio((s) => s.projects);
+  const currentProjectId = useStudio((s) => s.currentProjectId);
+  const setCurrentProject = useStudio((s) => s.setCurrentProject);
+  const setWorkbenchMemoryOpen = useStudio((s) => s.setWorkbenchMemoryOpen);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [activeSubLabel, setActiveSubLabel] = useState<string>("创作工作台");
 
   useEffect(() => {
     void init();
   }, [init]);
 
+  // 没有项目时默认落在首页（项目在那里新建）
+  useEffect(() => {
+    if (ready && projects.length === 0 && page === "workbench") setPage("home");
+  }, [ready, projects.length]);
+
   if (!sloth) return <BridgeMissing />;
   if (!ready) return <div className="app-loading">正在打开工作室…</div>;
 
   const bg = settings?.backgroundImage ?? null;
+  const activeProjectId = currentProjectId ?? projects[0]?.id ?? null;
+
+  function gotoProject(pid: string, target: Page, subLabel?: string) {
+    setCurrentProject(pid);
+    setExpandedId(pid);
+    if (subLabel) setActiveSubLabel(subLabel);
+    setPage(target);
+  }
+
+  const subItems: { target: Page; label: string }[] = [
+    { target: "workbench", label: "创作工作台" },
+    { target: "editor", label: "章节编辑器" },
+    { target: "project-workflows", label: "工作流管理" },
+    { target: "workbench", label: "记忆管理" },
+    { target: "project-settings", label: "项目设置" }
+  ];
 
   return (
     <div className="app-shell">
@@ -58,23 +87,89 @@ export default function App() {
         <div className="sidebar-top">
           <Brand />
         </div>
-        <div className="nav-label">创作空间</div>
         <nav className="nav-list">
-          {nav.map(({ id, label, icon: Icon }) => (
-            <button key={id} className={`nav-item ${page === id ? "active" : ""}`} onClick={() => setPage(id)}>
-              <Icon size={18} strokeWidth={1.8} />
-              <span>{label}</span>
+          <button
+            className={`nav-item nav-l1 ${page === "home" ? "active" : ""}`}
+            onClick={() => setPage("home")}
+          >
+            <BookOpen size={18} strokeWidth={1.8} />
+            <span>首页</span>
+          </button>
+        </nav>
+        <div className="nav-label">小说</div>
+        <nav className="nav-list">
+          {projects.length === 0 && (
+            <button className="nav-item nav-l3 nav-hint" onClick={() => setPage("home")}>
+              <span>＋ 还没有项目，点击去新建</span>
             </button>
-          ))}
+          )}
+          {projects.map((p) => {
+            const expanded = expandedId === p.id;
+            const isActiveProject =
+              activeProjectId === p.id &&
+              (page === "workbench" || page === "editor" || page === "project-settings" || page === "project-workflows");
+            return (
+              <div key={p.id} className="nav-group">
+                <button
+                  className={`nav-item nav-l2 ${expanded ? "expanded" : ""} ${isActiveProject ? "active" : ""}`}
+                  onClick={() => {
+                    setExpandedId(expanded ? null : p.id);
+                    setCurrentProject(p.id);
+                    if (!expanded) {
+                      setActiveSubLabel("创作工作台");
+                      setPage("workbench");
+                    }
+                  }}
+                >
+                  <BookOpen size={16} strokeWidth={1.8} />
+                  <span>{p.title}</span>
+                  <ChevronRight size={13} className={`nav-chevron ${expanded ? "down" : ""}`} />
+                </button>
+                {expanded && (
+                  <div className="nav-sub">
+                    {subItems.map((s) => {
+                      const active = isActiveProject && activeSubLabel === s.label && page === s.target;
+                      return (
+                        <button
+                          key={s.label}
+                          className={`nav-item nav-l3 ${active ? "active" : ""}`}
+                          onClick={() => {
+                            setActiveSubLabel(s.label);
+                            if (s.label === "记忆管理") {
+                              setCurrentProject(p.id);
+                              setWorkbenchMemoryOpen(true);
+                              setPage("workbench");
+                            } else {
+                              gotoProject(p.id, s.target, s.label);
+                            }
+                          }}
+                        >
+                          <span>{s.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </nav>
+        <div className="nav-label">工具</div>
+        <nav className="nav-list">
+          <button className={`nav-item ${page === "agents" ? "active" : ""}`} onClick={() => setPage("agents")}>
+            <Sparkles size={18} strokeWidth={1.8} />
+            <span>智能体 (Agents)</span>
+          </button>
+          <button className={`nav-item ${page === "workflows" ? "active" : ""}`} onClick={() => setPage("workflows")}>
+            <Workflow size={18} strokeWidth={1.8} />
+            <span>工作流 (Workflows)</span>
+          </button>
         </nav>
         <div className="sidebar-bottom">
-          <div className="local-status">
-            <span className="status-dot" />
-            <div>
-              <strong>本地工作区</strong>
-              <small>数据保存在此设备</small>
-            </div>
-          </div>
+          <button className="nav-item" onClick={() => void sloth?.app.openConfig("settings")}>
+            <SlidersHorizontal size={16} strokeWidth={1.8} />
+            <span>设置</span>
+          </button>
           <div className="sidebar-foot">
             <span>Sloth Story Studio</span>
             <span>v0.1.0</span>
@@ -102,6 +197,12 @@ export default function App() {
           </div>
         </header>
 
+        <div className={`page-content ${page === "home" ? "" : "page-hidden"}`}>
+          <HomePage onOpenProject={() => setPage("workbench")} />
+        </div>
+        <div className={`page-content ${page === "workbench" ? "" : "page-hidden"}`}>
+          <WorkbenchPage />
+        </div>
         <div className={`page-content page-fill ${page === "editor" ? "" : "page-hidden"}`}>
           <EditorPage query={query} />
         </div>
@@ -110,6 +211,12 @@ export default function App() {
         </div>
         <div className={`page-content page-fill ${page === "workflows" ? "" : "page-hidden"}`}>
           <WorkflowsPage />
+        </div>
+        <div className={`page-content ${page === "project-settings" ? "" : "page-hidden"}`}>
+          <ProjectSettingsPage />
+        </div>
+        <div className={`page-content ${page === "project-workflows" ? "" : "page-hidden"}`}>
+          <ProjectWorkflowsPage />
         </div>
 
         <footer className="app-footer">
