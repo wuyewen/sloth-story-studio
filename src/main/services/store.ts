@@ -2,7 +2,7 @@ import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import type { AgentProfile, ModelProvider, WorkflowDef } from "../../shared/types.js";
+import type { AgentProfile, ItemGroup, ModelProvider, WorkflowDef } from "../../shared/types.js";
 import type { AppSettings } from "../../shared/types.js";
 
 function dataDir(): string {
@@ -211,7 +211,7 @@ function buildBuiltinWorkflow(agentIdByName: (name: string) => string | null): W
       agent("outline", "大纲设计师", "大纲设计师", 340, 80, "用户需求：{{input}}"),
       agent("draft", "小说写手初稿", "小说写手", 620, 80, "用户需求：{{input}}\n故事大纲：{{nodes.outline.output}}"),
       agent("review", "审核编辑", "审核编辑", 900, 80, "用户需求：{{input}}\n故事大纲：{{nodes.outline.output}}\n小说稿件：{{nodes.draft.output}}"),
-      agent("reader", "读者顾问", "读者顾问", 1180, 80, "用户需求：{{input}}\n小说稿件：{{nodes.draft.output}}\n审核意见：{{nodes.review.output}}"),
+      agent("reader", "读者顾问", "读者顾问", 1180, 80, "用户需求：{{input}}\n小说稿件：{{nodes.draft.output}}\n审核意见：{{nodes.review.output}}\n\n请从读者视角评审。【硬性要求】结尾必须单独一行输出结论标记：CHAPTER_RESULT: PASS（满意无需返修）或 CHAPTER_RESULT: REVISE（需要返修）。"),
       agent(
         "revise",
         "小说写手修订",
@@ -240,12 +240,12 @@ function buildBuiltinWorkflow(agentIdByName: (name: string) => string | null): W
         id: "e5",
         source: "reader",
         target: "revise",
-        label: "有问题，需修改（最多3次）",
+        label: "需返修（最多3次）",
         data: {
           line: "step",
           color: "#ef4444",
           conditionExpr:
-            "(context.visits['小说写手修订'] || 0) < 3 && (output.includes('需修改') || output.includes('有问题') || output.includes('不通过'))"
+            "/CHAPTER_RESULT\\s*:\\s*REVISE/i.test(String(output)) && (context.visits['小说写手修订'] || 0) < 3"
         }
       },
       {
@@ -267,7 +267,7 @@ function buildBuiltinWorkflow(agentIdByName: (name: string) => string | null): W
           line: "bezier",
           color: "#22c55e",
           conditionExpr:
-            "(context.visits['小说写手修订'] || 0) >= 3 || !(output.includes('需修改') || output.includes('有问题') || output.includes('不通过'))"
+            "/CHAPTER_RESULT\\s*:\\s*PASS/i.test(String(output)) || (context.visits['小说写手修订'] || 0) >= 3"
         }
       },
       { id: "e8", source: "final", target: "end", label: "输出终稿", data: { line: "bezier", color: "#94a3b8" } }
@@ -399,10 +399,10 @@ function wf03(byName: (name: string) => string | null, now: number): WorkflowDef
     builtin: true,
     nodes: [
       START,
-      mkPrompt("ctx", "读取本章记忆", 340, 80, "本章写作任务：{{input}}\n\n【全书大纲】\n{{memory.master-outline}}\n\n【风格规范】\n{{memory.style-guide}}\n\n【角色状态】\n{{memory.character-state}}\n\n【伏笔追踪】\n{{memory.foreshadowing-tracker}}\n\n【上一单元摘要】\n{{memory.unit-summaries/latest}}"),
+      mkPrompt("ctx", "读取本章记忆", 340, 80, "本章写作任务：{{input}}\n\n【全书大纲】\n{{memory.master-outline}}\n\n【风格规范】\n{{memory.style-guide}}\n\n【角色状态】\n{{memory.character-state}}\n\n【伏笔追踪】\n{{memory.foreshadowing-tracker}}\n\n【上一单元摘要】\n{{memory.unit-summaries/latest}}\n\n【硬性要求】只输出本章任务范围内的内容与必要记忆；不要提前展开后续章节的情节，不要输出任务以外的建议、说明或预告。"),
       mkAgent(byName, "draft", "写作初稿", "小说写手", 620, 80, "记忆与任务：\n{{nodes.ctx.output}}\n\n请完成本章初稿（完整正文）。"),
       mkAgent(byName, "edit", "编辑审查", "审核编辑", 900, 80, "章节初稿：\n{{nodes.draft.output}}\n\n写作任务：\n{{nodes.ctx.output}}\n\n请审查逻辑、设定一致性、文风，列出问题清单（若无问题请明确写「通过」）。"),
-      mkAgent(byName, "reader", "读者评审", "读者顾问", 1180, 80, "章节正文：\n{{nodes.draft.output}}\n\n编辑意见：\n{{nodes.edit.output}}\n\n请从读者视角评审本章（若无问题请明确写「通过」）。"),
+      mkAgent(byName, "reader", "读者评审", "读者顾问", 1180, 80, "章节正文：\n{{nodes.draft.output}}\n\n编辑意见：\n{{nodes.edit.output}}\n\n请从读者视角评审本章。【硬性要求】结尾必须单独一行输出结论标记：CHAPTER_RESULT: PASS（满意无需返修）或 CHAPTER_RESULT: REVISE（需要返修）。"),
       mkAgent(
         byName,
         "revise",
@@ -424,12 +424,11 @@ function wf03(byName: (name: string) => string | null, now: number): WorkflowDef
         id: "e5",
         source: "reader",
         target: "revise",
-        label: "有问题，返修（最多3轮）",
+        label: "需返修（最多3轮）",
         data: {
           line: "step",
           color: "#ef4444",
-          conditionExpr:
-            "(context.visits['写手返修'] || 0) < 3 && (output.includes('需修改') || output.includes('有问题') || output.includes('不通过'))"
+          conditionExpr: "/CHAPTER_RESULT\\s*:\\s*REVISE/i.test(String(output)) && (context.visits['写手返修'] || 0) < 3"
         }
       },
       {
@@ -450,8 +449,7 @@ function wf03(byName: (name: string) => string | null, now: number): WorkflowDef
         data: {
           line: "bezier",
           color: "#22c55e",
-          conditionExpr:
-            "(context.visits['写手返修'] || 0) >= 3 || !(output.includes('需修改') || output.includes('有问题') || output.includes('不通过'))"
+          conditionExpr: "/CHAPTER_RESULT\\s*:\\s*PASS/i.test(String(output)) || (context.visits['写手返修'] || 0) >= 3"
         }
       }
     ],
@@ -572,4 +570,19 @@ export function readWorkflows(): WorkflowDef[] {
 
 export function writeWorkflows(workflows: WorkflowDef[]): void {
   writeJsonAbs(workflowsFile(), workflows);
+}
+
+// ---- 分组（与 agents.json / workflows.json 同目录存储，跟随自定义目录） ----
+
+function groupsFile(kind: "agent" | "workflow"): string {
+  const base = kind === "agent" ? agentsFile() : workflowsFile();
+  return path.join(path.dirname(base), `${kind}-groups.json`);
+}
+
+export function readGroups(kind: "agent" | "workflow"): ItemGroup[] {
+  return readJsonAbs<ItemGroup[]>(groupsFile(kind), []);
+}
+
+export function writeGroups(kind: "agent" | "workflow", groups: ItemGroup[]): void {
+  writeJsonAbs(groupsFile(kind), groups);
 }

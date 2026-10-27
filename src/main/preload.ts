@@ -53,7 +53,13 @@ const api: SlothApi = {
   agents: {
     list: () => ipcRenderer.invoke("agents:list"),
     save: (input: AgentInput) => ipcRenderer.invoke("agents:save", input),
-    remove: (id: string) => ipcRenderer.invoke("agents:delete", id)
+    remove: (id: string) => ipcRenderer.invoke("agents:delete", id),
+    listGroups: () => ipcRenderer.invoke("agents:groupsList"),
+    createGroup: (name: string) => ipcRenderer.invoke("agents:groupsCreate", name),
+    renameGroup: (id: string, name: string) => ipcRenderer.invoke("agents:groupsRename", id, name),
+    deleteGroup: (id: string) => ipcRenderer.invoke("agents:groupsDelete", id),
+    setGroup: (agentId: string, groupId: string | null) =>
+      ipcRenderer.invoke("agents:setGroup", agentId, groupId)
   },
   novels: {
     list: () => ipcRenderer.invoke("novels:list"),
@@ -80,8 +86,14 @@ const api: SlothApi = {
       ipcRenderer.invoke("novels:createUnit", projectId, title),
     renameUnit: (projectId: string, unitId: string, title: string) =>
       ipcRenderer.invoke("novels:renameUnit", projectId, unitId, title),
+    renameChapter: (projectId: string, chapterId: string, title: string) =>
+      ipcRenderer.invoke("novels:renameChapter", projectId, chapterId, title),
+    deleteUnit: (projectId: string, unitId: string) =>
+      ipcRenderer.invoke("novels:deleteUnit", projectId, unitId),
     setChapterUnit: (projectId: string, chapterId: string, unitId: string) =>
       ipcRenderer.invoke("novels:setChapterUnit", projectId, chapterId, unitId),
+    unsetChapterUnit: (projectId: string, chapterId: string) =>
+      ipcRenderer.invoke("novels:unsetChapterUnit", projectId, chapterId),
     memoryList: (projectId: string) => ipcRenderer.invoke("novels:memoryList", projectId),
     memoryRead: (projectId: string, rel: string) =>
       ipcRenderer.invoke("novels:memoryRead", projectId, rel),
@@ -123,7 +135,13 @@ const api: SlothApi = {
     run: (runId: string, workflowId: string, input: string, projectId?: string) =>
       ipcRenderer.invoke("workflows:run", runId, workflowId, input, projectId),
     stop: (runId: string) => ipcRenderer.invoke("workflows:stop", runId),
-    onEvent: (cb) => subscribe<[WorkflowRunEvent]>("workflow:event", cb)
+    onEvent: (cb) => subscribe<[WorkflowRunEvent]>("workflow:event", cb),
+    listGroups: () => ipcRenderer.invoke("workflows:groupsList"),
+    createGroup: (name: string) => ipcRenderer.invoke("workflows:groupsCreate", name),
+    renameGroup: (id: string, name: string) => ipcRenderer.invoke("workflows:groupsRename", id, name),
+    deleteGroup: (id: string) => ipcRenderer.invoke("workflows:groupsDelete", id),
+    setGroup: (workflowId: string, groupId: string | null) =>
+      ipcRenderer.invoke("workflows:setGroup", workflowId, groupId)
   },
   proposals: {
     list: (projectId: string) => ipcRenderer.invoke("proposals:list", projectId),

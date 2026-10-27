@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BookOpen, Sparkles, Workflow, Search, ChevronRight, SlidersHorizontal } from "lucide-react";
+import { BookOpen, Home, Sparkles, Workflow, Search, ChevronRight, SlidersHorizontal, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { sloth } from "../api";
 import { useStudio } from "../state/store";
 import { BridgeMissing } from "./components/Modal";
@@ -10,6 +10,7 @@ import WorkbenchPage from "./pages/WorkbenchPage";
 import ProjectSettingsPage from "./pages/ProjectSettingsPage";
 import ProjectWorkflowsPage from "./pages/ProjectWorkflowsPage";
 import HomePage from "./pages/HomePage";
+import type { ItemGroup } from "../../shared/types";
 
 type Page = "home" | "workbench" | "editor" | "agents" | "workflows" | "project-settings" | "project-workflows";
 
@@ -32,9 +33,77 @@ function Brand() {
   );
 }
 
+function ToolGroup({
+  icon,
+  label,
+  pageId,
+  page,
+  setPage,
+  groups,
+  activeGroup,
+  setActiveGroup,
+  onDropItem
+}: {
+  icon: React.ReactNode;
+  label: string;
+  pageId: Page;
+  page: Page;
+  setPage: (p: Page) => void;
+  groups: ItemGroup[];
+  activeGroup: string | null;
+  setActiveGroup: (id: string | null) => void;
+  onDropItem: (itemId: string, groupId: string | null) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const items: { id: string | null; label: string }[] = [
+    { id: null, label: "全部" },
+    { id: "default", label: "默认分组" },
+    ...groups.map((g) => ({ id: g.id, label: g.name }))
+  ];
+  return (
+    <div className="nav-group">
+      <button
+        className={`nav-item nav-l2 ${expanded ? "expanded" : ""} ${page === pageId ? "active" : ""}`}
+        onClick={() => {
+          setExpanded(!expanded);
+          setPage(pageId);
+          setActiveGroup(null);
+        }}
+      >
+        {icon}
+        <span>{label}</span>
+        <ChevronRight size={13} className={`nav-chevron ${expanded ? "down" : ""}`} />
+      </button>
+      {expanded && (
+        <div className="nav-sub">
+          {items.map((it) => (
+            <button
+              key={it.id ?? "all"}
+              className={`nav-item nav-l3 ${page === pageId && activeGroup === it.id ? "active" : ""}`}
+              onClick={() => {
+                setPage(pageId);
+                setActiveGroup(it.id);
+              }}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                const itemId = e.dataTransfer.getData("text/plain");
+                if (itemId) onDropItem(itemId, it.id === "default" ? null : it.id);
+              }}
+            >
+              <span>{it.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>("home");
   const [query, setQuery] = useState("");
+  const [collapsed, setCollapsed] = useState(false);
   const ready = useStudio((s) => s.ready);
   const settings = useStudio((s) => s.settings);
   const init = useStudio((s) => s.init);
@@ -42,6 +111,14 @@ export default function App() {
   const currentProjectId = useStudio((s) => s.currentProjectId);
   const setCurrentProject = useStudio((s) => s.setCurrentProject);
   const setWorkbenchMemoryOpen = useStudio((s) => s.setWorkbenchMemoryOpen);
+  const agentGroups = useStudio((s) => s.agentGroups);
+  const workflowGroups = useStudio((s) => s.workflowGroups);
+  const activeAgentGroup = useStudio((s) => s.activeAgentGroup);
+  const activeWorkflowGroup = useStudio((s) => s.activeWorkflowGroup);
+  const setActiveAgentGroup = useStudio((s) => s.setActiveAgentGroup);
+  const setActiveWorkflowGroup = useStudio((s) => s.setActiveWorkflowGroup);
+  const refreshAgents = useStudio((s) => s.refreshAgents);
+  const refreshWorkflows = useStudio((s) => s.refreshWorkflows);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [activeSubLabel, setActiveSubLabel] = useState<string>("创作工作台");
 
@@ -83,16 +160,25 @@ export default function App() {
         </div>
       )}
 
-      <aside className="sidebar">
+      <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
         <div className="sidebar-top">
           <Brand />
+          <button
+            className="icon-button collapse-button"
+            aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}
+            title={collapsed ? "展开侧边栏" : "收起侧边栏"}
+            onClick={() => setCollapsed(!collapsed)}
+          >
+            {collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+          </button>
         </div>
+        <div className="sidebar-scroll">
         <nav className="nav-list">
           <button
             className={`nav-item nav-l1 ${page === "home" ? "active" : ""}`}
             onClick={() => setPage("home")}
           >
-            <BookOpen size={18} strokeWidth={1.8} />
+            <Home size={18} strokeWidth={1.8} />
             <span>首页</span>
           </button>
         </nav>
@@ -121,7 +207,7 @@ export default function App() {
                     }
                   }}
                 >
-                  <BookOpen size={16} strokeWidth={1.8} />
+                  <BookOpen size={18} strokeWidth={1.8} />
                   <span>{p.title}</span>
                   <ChevronRight size={13} className={`nav-chevron ${expanded ? "down" : ""}`} />
                 </button>
@@ -156,18 +242,33 @@ export default function App() {
         </nav>
         <div className="nav-label">工具</div>
         <nav className="nav-list">
-          <button className={`nav-item ${page === "agents" ? "active" : ""}`} onClick={() => setPage("agents")}>
-            <Sparkles size={18} strokeWidth={1.8} />
-            <span>智能体 (Agents)</span>
-          </button>
-          <button className={`nav-item ${page === "workflows" ? "active" : ""}`} onClick={() => setPage("workflows")}>
-            <Workflow size={18} strokeWidth={1.8} />
-            <span>工作流 (Workflows)</span>
-          </button>
+          <ToolGroup
+            icon={<Sparkles size={18} strokeWidth={1.8} />}
+            label="智能体 (Agents)"
+            pageId="agents"
+            page={page}
+            setPage={setPage}
+            groups={agentGroups}
+            activeGroup={activeAgentGroup}
+            setActiveGroup={setActiveAgentGroup}
+            onDropItem={(itemId, gid) => void sloth?.agents.setGroup(itemId, gid).then(() => refreshAgents())}
+          />
+          <ToolGroup
+            icon={<Workflow size={18} strokeWidth={1.8} />}
+            label="工作流 (Workflows)"
+            pageId="workflows"
+            page={page}
+            setPage={setPage}
+            groups={workflowGroups}
+            activeGroup={activeWorkflowGroup}
+            setActiveGroup={setActiveWorkflowGroup}
+            onDropItem={(itemId, gid) => void sloth?.workflows.setGroup(itemId, gid).then(() => refreshWorkflows())}
+          />
         </nav>
+        </div>
         <div className="sidebar-bottom">
           <button className="nav-item" onClick={() => void sloth?.app.openConfig("settings")}>
-            <SlidersHorizontal size={16} strokeWidth={1.8} />
+            <SlidersHorizontal size={18} strokeWidth={1.8} />
             <span>设置</span>
           </button>
           <div className="sidebar-foot">

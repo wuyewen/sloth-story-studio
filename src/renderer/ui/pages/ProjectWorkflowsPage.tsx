@@ -16,9 +16,11 @@ const SLOT_OPTIONS: { value: WorkflowSlot | ""; label: string }[] = [
 export default function ProjectWorkflowsPage() {
   const projects = useStudio((s) => s.projects);
   const workflows = useStudio((s) => s.workflows);
+  const workflowGroups = useStudio((s) => s.workflowGroups);
   const currentProjectId = useStudio((s) => s.currentProjectId);
   const refreshProjects = useStudio((s) => s.refreshProjects);
   const [addOpen, setAddOpen] = useState(false);
+  const [addGroup, setAddGroup] = useState<string | null>(null); // 弹窗内分组筛选
 
   const project = projects.find((p) => p.id === currentProjectId) ?? projects[0] ?? null;
 
@@ -32,8 +34,13 @@ export default function ProjectWorkflowsPage() {
   const assignable = useMemo(() => {
     if (!project) return [];
     const used = new Set(project.workflowIds ?? []);
-    return workflows.filter((w) => !used.has(w.id));
-  }, [project, workflows]);
+    return workflows.filter((w) => {
+      if (used.has(w.id)) return false;
+      if (addGroup === null) return true;
+      if (addGroup === "default") return !w.groupId;
+      return w.groupId === addGroup;
+    });
+  }, [project, workflows, addGroup]);
 
   if (!project) {
     return (
@@ -122,6 +129,16 @@ export default function ProjectWorkflowsPage() {
 
       {addOpen && (
         <Modal title="添加工作流到此项目" onClose={() => setAddOpen(false)} width={520}>
+          <label className="form-row">
+            <span className="form-label">分组筛选</span>
+            <select className="text-input" value={addGroup ?? ""} onChange={(e) => setAddGroup(e.target.value || null)}>
+              <option value="">全部分组</option>
+              <option value="default">默认分组</option>
+              {workflowGroups.map((g) => (
+                <option key={g.id} value={g.id}>{g.name}</option>
+              ))}
+            </select>
+          </label>
           {assignable.length === 0 && <p className="model-empty">没有更多可添加的工作流了。</p>}
           <div className="prop-list">
             {assignable.map((w) => (
@@ -135,7 +152,10 @@ export default function ProjectWorkflowsPage() {
               >
                 <div className="prop-main">
                   <strong>{w.name}</strong>
-                  <small>{w.description || `${w.nodes.length} 节点`}</small>
+                  <small>
+                    {w.description || `${w.nodes.length} 节点`}
+                    {w.groupId && ` · ${workflowGroups.find((g) => g.id === w.groupId)?.name ?? "分组"}`}
+                  </small>
                 </div>
                 <Plus size={15} />
               </button>

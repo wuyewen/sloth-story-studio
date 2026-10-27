@@ -38,8 +38,15 @@ export interface AgentProfile {
   temperature: number;
   color: string; // 卡片标识色
   builtin: boolean;
+  groupId?: string | null; // 所属分组，空为默认分组
   createdAt: number;
   updatedAt: number;
+}
+
+export interface ItemGroup {
+  id: string;
+  name: string;
+  createdAt: number;
 }
 
 export type AgentInput = Omit<AgentProfile, "id" | "builtin" | "createdAt" | "updatedAt"> & { id?: string };
@@ -166,6 +173,7 @@ export interface WorkflowDef {
   description: string;
   builtin?: boolean; // 内置工作流不可删除
   providerId?: string | null; // 工作流级大模型，优先级高于 Agent 绑定
+  groupId?: string | null; // 所属分组，空为默认分组
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   viewport?: { x: number; y: number; zoom: number };
@@ -245,6 +253,11 @@ export interface SlothApi {
     list(): Promise<AgentProfile[]>;
     save(input: AgentInput): Promise<AgentProfile[]>;
     remove(id: string): Promise<AgentProfile[]>;
+    listGroups(): Promise<ItemGroup[]>;
+    createGroup(name: string): Promise<ItemGroup[]>;
+    renameGroup(id: string, name: string): Promise<ItemGroup[]>;
+    deleteGroup(id: string): Promise<ItemGroup[]>;
+    setGroup(agentId: string, groupId: string | null): Promise<AgentProfile[]>;
   };
   novels: {
     list(): Promise<NovelProject[]>;
@@ -261,7 +274,10 @@ export interface SlothApi {
     writeChapter(projectId: string, chapterId: string, content: string): Promise<void>;
     createUnit(projectId: string, title: string): Promise<NovelProject[]>;
     renameUnit(projectId: string, unitId: string, title: string): Promise<NovelProject[]>;
+    renameChapter(projectId: string, chapterId: string, title: string): Promise<NovelProject[]>;
+    deleteUnit(projectId: string, unitId: string): Promise<NovelProject[]>;
     setChapterUnit(projectId: string, chapterId: string, unitId: string): Promise<NovelProject[]>;
+    unsetChapterUnit(projectId: string, chapterId: string): Promise<NovelProject[]>;
     memoryList(projectId: string): Promise<MemoryFileInfo[]>;
     memoryRead(projectId: string, rel: string): Promise<string>;
     memoryWrite(projectId: string, rel: string, content: string): Promise<void>;
@@ -296,6 +312,11 @@ export interface SlothApi {
     run(runId: string, workflowId: string, input: string, projectId?: string): Promise<{ finalOutput?: string; error?: string; proposalsCreated?: number; proposalsError?: string }>;
     stop(runId: string): Promise<void>;
     onEvent(cb: (ev: WorkflowRunEvent) => void): () => void;
+    listGroups(): Promise<ItemGroup[]>;
+    createGroup(name: string): Promise<ItemGroup[]>;
+    renameGroup(id: string, name: string): Promise<ItemGroup[]>;
+    deleteGroup(id: string): Promise<ItemGroup[]>;
+    setGroup(workflowId: string, groupId: string | null): Promise<WorkflowDef[]>;
   };
   proposals: {
     list(projectId: string): Promise<MemoryProposal[]>;

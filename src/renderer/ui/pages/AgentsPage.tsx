@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { Plus, Pencil, Trash2, Sparkles } from "lucide-react";
+import { Plus, Pencil, Trash2, Sparkles, Search } from "lucide-react";
 import { sloth } from "../../api";
 import { providerName, useStudio } from "../../state/store";
 import { ConfirmDialog, Modal } from "../components/Modal";
+import GroupBar from "../components/GroupBar";
 import type { AgentProfile } from "../../../shared/types";
 
 const COLORS = ["#C85B4E", "#7D8796", "#E0A458", "#80A78A", "#5B7EC8", "#8A6FC8"];
@@ -21,6 +22,7 @@ interface FormState {
   providerId: string;
   temperature: number;
   color: string;
+  groupId: string;
 }
 
 const blank: FormState = {
@@ -29,7 +31,8 @@ const blank: FormState = {
   systemPrompt: "",
   providerId: "",
   temperature: 0.7,
-  color: COLORS[0]
+  color: COLORS[0],
+  groupId: ""
 };
 
 export default function AgentsPage() {
@@ -42,11 +45,29 @@ export default function AgentsPage() {
   const [form, setForm] = useState<FormState>(blank);
   const [error, setError] = useState("");
   const [deleting, setDeleting] = useState<AgentProfile | null>(null);
+  const groups = useStudio((s) => s.agentGroups);
+  const activeGroup = useStudio((s) => s.activeAgentGroup);
+  const setActiveGroup = useStudio((s) => s.setActiveAgentGroup);
+  const refreshGroups = useStudio((s) => s.refreshGroups);
+  const [search, setSearch] = useState("");
 
   const usable = providers.filter((p) => p.enabled);
 
+  const shownAgents = agents.filter((a) => {
+    const q = search.trim().toLowerCase();
+    if (q && !a.name.toLowerCase().includes(q) && !a.role.toLowerCase().includes(q)) return false;
+    if (activeGroup === null) return true;
+    if (activeGroup === "default") return !a.groupId;
+    return a.groupId === activeGroup;
+  });
+
+  async function dropToGroup(agentId: string, groupId: string | null) {
+    await sloth!.agents.setGroup(agentId, groupId);
+    await refresh();
+  }
+
   function openNew() {
-    setForm({ ...blank, providerId: usable[0]?.id ?? "" });
+    setForm({ ...blank, providerId: usable[0]?.id ?? "", groupId: activeGroup && activeGroup !== "default" ? activeGroup : "" });
     setError("");
     setEditing("new");
   }
@@ -58,7 +79,8 @@ export default function AgentsPage() {
       systemPrompt: a.systemPrompt,
       providerId: a.providerId ?? "",
       temperature: a.temperature,
-      color: a.color
+      color: a.color,
+      groupId: a.groupId ?? ""
     });
     setError("");
     setEditing(a);
@@ -80,7 +102,8 @@ export default function AgentsPage() {
       systemPrompt: form.systemPrompt,
       providerId: form.providerId || null,
       temperature: form.temperature,
-      color: form.color
+      color: form.color,
+      groupId: form.groupId || null
     });
     await refresh();
     setEditing(null);
@@ -100,10 +123,26 @@ export default function AgentsPage() {
           <h2>Agents</h2>
           <p>为创作流程配置不同职责的 AI 角色。</p>
         </div>
-        <button className="primary-button" onClick={openNew}>
-          <Plus size={16} /> 新建 Agent
-        </button>
+        <div className="head-actions">
+          <label className="search-box group-search">
+            <Search size={14} />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索 Agent…" />
+          </label>
+          <button className="primary-button" onClick={openNew}>
+            <Plus size={16} /> 新建 Agent
+          </button>
+        </div>
       </div>
+
+      <GroupBar
+        groups={groups}
+        active={activeGroup}
+        onSelect={setActiveGroup}
+        onCreate={async (name) => { await sloth!.agents.createGroup(name); await refreshGroups(); }}
+        onRename={async (id, name) => { await sloth!.agents.renameGroup(id, name); await refreshGroups(); }}
+        onDelete={async (id) => { await sloth!.agents.deleteGroup(id); await refreshGroups(); await refresh(); }}
+        onDropItem={dropToGroup}
+      />
 
       <div className="agents-scroll">
       {agents.length === 0 ? (
@@ -119,15 +158,24 @@ export default function AgentsPage() {
             </div>
           ))}
         </div>
+      ) : shownAgents.length === 0 ? (
+        <div className="wb-empty">这个分组里还没有 Agent，把卡片拖到上方分组标签即可归组。</div>
       ) : (
         <div className="agents-grid">
-          {agents.map((a) => (
-            <div className="agent-card" key={a.id}>
+          {shownAgents.map((a) => (
+            <div
+              className="agent-card draggable"
+              key={a.id}
+              draggable
+              onDragStart={(e) => e.dataTransfer.setData("text/plain", a.id)}
+              title="可拖拽到上方分组标签归组"
+            >
               <div className="agent-colorbar" style={{ background: a.color }} />
               <div className="agent-body">
                 <div className="agent-title-row">
                   <h3>{a.name}</h3>
                   {a.builtin && <span className="badge-builtin">内置</span>}
+                  {a.groupId && <span className="badge-builtin neutral">{groups.find((g) => g.id === a.groupId)?.name ?? "分组"}</span>}
                 </div>
                 <p className="agent-role">{a.role}</p>
                 <div className="agent-meta">
@@ -199,6 +247,15 @@ export default function AgentsPage() {
                 onChange={(e) => patch({ temperature: Number(e.target.value) })}
               />
             </div>
+          </div>
+          <div className="form-row">
+            <span className="form-label">分组</span>
+            <select className="text-input" value={form.groupId} onChange={(e) => patch({ groupId: e.target.value })}>
+              <option value="">默认分组</option>
+              {groups.map((g) => (
+                <option key={g.id} value={g.id}>{g.name}</option>
+              ))}
+            </select>
           </div>
           <div className="form-row">
             <span className="form-label">颜色</span>

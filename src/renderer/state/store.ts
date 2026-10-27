@@ -3,6 +3,7 @@ import { sloth } from "../api";
 import type {
   AgentProfile,
   AppSettings,
+  ItemGroup,
   ModelProviderInfo,
   NovelProject,
   WorkflowDef
@@ -17,8 +18,17 @@ interface StudioState {
   settings: AppSettings | null;
   currentProjectId: string | null; // 侧边栏选中的小说项目（树形导航）
   workbenchMemoryOpen: boolean; // 「记忆管理」导航时自动打开记忆弹窗
+  agentGroups: ItemGroup[];
+  workflowGroups: ItemGroup[];
+  activeAgentGroup: string | null; // null=全部 "default"=默认分组 其余=分组 id
+  activeWorkflowGroup: string | null;
+  canvasAgentGroup: string | null; // 画布工具条选的 Agent 分组（节点下拉只显示该组）
   setCurrentProject: (id: string | null) => void;
   setWorkbenchMemoryOpen: (v: boolean) => void;
+  setActiveAgentGroup: (id: string | null) => void;
+  setActiveWorkflowGroup: (id: string | null) => void;
+  setCanvasAgentGroup: (id: string | null) => void;
+  refreshGroups: () => Promise<void>;
   init: () => Promise<void>;
   refreshProviders: () => Promise<void>;
   refreshAgents: () => Promise<void>;
@@ -36,28 +46,48 @@ export const useStudio = create<StudioState>((set, get) => ({
   settings: null,
   currentProjectId: null,
   workbenchMemoryOpen: false,
+  agentGroups: [],
+  workflowGroups: [],
+  activeAgentGroup: null,
+  activeWorkflowGroup: null,
+  canvasAgentGroup: null,
   setCurrentProject: (id) => set({ currentProjectId: id }),
   setWorkbenchMemoryOpen: (v) => set({ workbenchMemoryOpen: v }),
+  setActiveAgentGroup: (id) => set({ activeAgentGroup: id }),
+  setActiveWorkflowGroup: (id) => set({ activeWorkflowGroup: id }),
+  setCanvasAgentGroup: (id) => set({ canvasAgentGroup: id }),
+
+  async refreshGroups() {
+    if (!sloth) return;
+    const [agentGroups, workflowGroups] = await Promise.all([
+      sloth.agents.listGroups(),
+      sloth.workflows.listGroups()
+    ]);
+    set({ agentGroups, workflowGroups });
+  },
 
   async init() {
     if (!sloth) {
       set({ ready: true });
       return;
     }
-    const [providers, agents, projects, workflows, settings] = await Promise.all([
+    const [providers, agents, projects, workflows, settings, agentGroups, workflowGroups] = await Promise.all([
       sloth.models.list(),
       sloth.agents.list(),
       sloth.novels.list(),
       sloth.workflows.list(),
-      sloth.settings.get()
+      sloth.settings.get(),
+      sloth.agents.listGroups(),
+      sloth.workflows.listGroups()
     ]);
-    set({ providers, agents, projects, workflows, settings, ready: true });
+    set({ providers, agents, projects, workflows, settings, agentGroups, workflowGroups, ready: true });
     sloth.settings.onChanged((next) => {
       set({ settings: next });
       // 目录类设置变化后，相关数据可能来自新位置，全部刷新
       void get().refreshAgents();
       void get().refreshWorkflows();
       void get().refreshProjects();
+      void get().refreshGroups();
     });
     sloth.models.onChanged((next) => set({ providers: next }));
     sloth.app.onFocus(() => {
@@ -65,6 +95,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       void get().refreshWorkflows();
       void get().refreshAgents();
       void get().refreshProjects();
+      void get().refreshGroups();
     });
   },
 

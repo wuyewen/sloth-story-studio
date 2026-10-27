@@ -6,6 +6,7 @@ import type {
   AgentProfile,
   AppSettings,
   ChatRequest,
+  ItemGroup,
   ModelProviderInfo,
   ModelProviderInput,
   ProposalInput,
@@ -17,10 +18,12 @@ import {
   migrateStoreFile,
   newId,
   readAgents,
+  readGroups,
   readModels,
   readSettings,
   readWorkflows,
   writeAgents,
+  writeGroups,
   writeModels,
   writeSettings,
   writeWorkflows,
@@ -212,6 +215,59 @@ export function registerIpc(): void {
     return next;
   });
 
+  // ---- 分组（agents / workflows 共用结构） ----
+
+  const groupHandlers = (kind: "agent" | "workflow") => {
+    const prefix = kind === "agent" ? "agents" : "workflows";
+    const readItems = kind === "agent" ? readAgents : readWorkflows;
+    const writeItems = kind === "agent" ? writeAgents : writeWorkflows;
+
+    ipcMain.handle(`${prefix}:groupsList`, () => readGroups(kind));
+
+    ipcMain.handle(`${prefix}:groupsCreate`, (_e, name: string): ItemGroup[] => {
+      const groups = readGroups(kind);
+      groups.push({ id: newId(), name: name.trim() || "未命名分组", createdAt: Date.now() });
+      writeGroups(kind, groups);
+      return groups;
+    });
+
+    ipcMain.handle(`${prefix}:groupsRename`, (_e, id: string, name: string): ItemGroup[] => {
+      const groups = readGroups(kind);
+      const g = groups.find((x) => x.id === id);
+      if (!g) throw new Error("分组不存在");
+      g.name = name.trim() || g.name;
+      writeGroups(kind, groups);
+      return groups;
+    });
+
+    ipcMain.handle(`${prefix}:groupsDelete`, (_e, id: string): ItemGroup[] => {
+      writeGroups(kind, readGroups(kind).filter((g) => g.id !== id));
+      // 组内成员回落默认分组
+      const items = readItems() as Array<{ id: string; groupId?: string | null }>;
+      let touched = false;
+      for (const item of items) {
+        if (item.groupId === id) {
+          item.groupId = null;
+          touched = true;
+        }
+      }
+      if (touched) writeItems(items as never);
+      return readGroups(kind);
+    });
+
+    ipcMain.handle(`${prefix}:setGroup`, (_e, itemId: string, groupId: string | null) => {
+      const items = readItems() as Array<{ id: string; groupId?: string | null }>;
+      const item = items.find((x) => x.id === itemId);
+      if (!item) throw new Error("条目不存在");
+      item.groupId = groupId;
+      writeItems(items as never);
+      return items;
+    });
+  };
+
+  groupHandlers("agent");
+  groupHandlers("workflow");
+
   // ---- novels ----
 
   ipcMain.handle("novels:list", () => novelFs.list());
@@ -259,10 +315,22 @@ export function registerIpc(): void {
     novelFs.renameUnit(projectId, unitId, title)
   );
 
+  ipcMain.handle("novels:renameChapter", (_e, projectId: string, chapterId: string, title: string) =>
+    novelFs.renameChapter(projectId, chapterId, title)
+  );
+
+  ipcMain.handle("novels:deleteUnit", (_e, projectId: string, unitId: string) =>
+    novelFs.deleteUnit(projectId, unitId)
+  );
+
   ipcMain.handle(
     "novels:setChapterUnit",
     (_e, projectId: string, chapterId: string, unitId: string) =>
       novelFs.setChapterUnit(projectId, chapterId, unitId)
+  );
+
+  ipcMain.handle("novels:unsetChapterUnit", (_e, projectId: string, chapterId: string) =>
+    novelFs.unsetChapterUnit(projectId, chapterId)
   );
 
   ipcMain.handle("novels:memoryList", (_e, projectId: string) => novelFs.memoryList(projectId));
