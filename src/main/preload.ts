@@ -74,8 +74,8 @@ const api: SlothApi = {
     setWorkflowSlot: (projectId: string, slot: string, workflowId: string | null) =>
       ipcRenderer.invoke("novels:setWorkflowSlot", projectId, slot, workflowId),
     remove: (id: string) => ipcRenderer.invoke("novels:remove", id),
-    createChapter: (projectId: string, title: string) =>
-      ipcRenderer.invoke("novels:createChapter", projectId, title),
+    createChapter: (projectId: string, title: string, unitId?: string) =>
+      ipcRenderer.invoke("novels:createChapter", projectId, title, unitId),
     deleteChapter: (projectId: string, chapterId: string) =>
       ipcRenderer.invoke("novels:deleteChapter", projectId, chapterId),
     readChapter: (projectId: string, chapterId: string) =>

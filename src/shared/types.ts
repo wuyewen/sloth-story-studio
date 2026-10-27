@@ -268,7 +268,7 @@ export interface SlothApi {
     unassignWorkflow(projectId: string, workflowId: string): Promise<NovelProject[]>;
     setWorkflowSlot(projectId: string, slot: WorkflowSlot, workflowId: string | null): Promise<NovelProject[]>;
     remove(id: string): Promise<NovelProject[]>;
-    createChapter(projectId: string, title: string): Promise<NovelProject[]>;
+    createChapter(projectId: string, title: string, unitId?: string): Promise<NovelProject[]>;
     deleteChapter(projectId: string, chapterId: string): Promise<NovelProject[]>;
     readChapter(projectId: string, chapterId: string): Promise<string>;
     writeChapter(projectId: string, chapterId: string, content: string): Promise<void>;

@@ -292,8 +292,8 @@ export function registerIpc(): void {
     novelFs.setWorkflowSlot(projectId, slot, workflowId)
   );
   ipcMain.handle("novels:remove", (_e, id: string) => novelFs.remove(id));
-  ipcMain.handle("novels:createChapter", (_e, projectId: string, title: string) =>
-    novelFs.createChapter(projectId, title)
+  ipcMain.handle("novels:createChapter", (_e, projectId: string, title: string, unitId?: string) =>
+    novelFs.createChapter(projectId, title, unitId)
   );
   ipcMain.handle("novels:deleteChapter", (_e, projectId: string, chapterId: string) =>
     novelFs.deleteChapter(projectId, chapterId)

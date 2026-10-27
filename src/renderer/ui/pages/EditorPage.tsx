@@ -85,23 +85,17 @@ export default function EditorPage({ query }: { query: string }) {
   const activePid = project?.id ?? null; // 实际生效的项目 id（本地选择或侧边栏全局选择）
   const chapter = project?.chapters.find((c) => c.id === chapterId) ?? null;
 
-  // 左栏单元选择：默认最新单元；「outside」= 单元外章节（序章等）
+  // 左栏单元选择：默认最新单元
   const [unitSel, setUnitSel] = useState<string>("");
-  const outsideChapters = useMemo(() => {
-    if (!project) return [];
-    const assigned = new Set(project.units.flatMap((u) => u.chapterIds));
-    return project.chapters.filter((c) => !assigned.has(c.id));
-  }, [project]);
-  const effectiveUnitSel = unitSel || (project?.units[project.units.length - 1]?.id ?? "outside");
+  const effectiveUnitSel = unitSel || (project?.units[project.units.length - 1]?.id ?? "");
   const visibleChapters = useMemo(() => {
     if (!project) return [];
-    if (effectiveUnitSel === "outside") return outsideChapters;
     const u = project.units.find((x) => x.id === effectiveUnitSel);
-    if (!u) return outsideChapters;
+    if (!u) return [];
     return u.chapterIds
       .map((id) => project.chapters.find((c) => c.id === id))
       .filter((c): c is NonNullable<typeof c> => Boolean(c));
-  }, [project, effectiveUnitSel, outsideChapters]);
+  }, [project, effectiveUnitSel]);
 
   const shownProjects = useMemo(
     () => projects.filter((p) => p.title.toLowerCase().includes(query.toLowerCase())),
@@ -220,27 +214,13 @@ export default function EditorPage({ query }: { query: string }) {
     setUnitOpen(false);
   }
 
-  async function moveChapterOut(chapterIdToMove: string) {
-    if (!sloth || !activePid) return;
-    await sloth.novels.unsetChapterUnit(activePid, chapterIdToMove);
-    await refreshProjects();
-  }
-
-  async function moveChapterIn(chapterIdToMove: string) {
-    if (!sloth || !activePid || !project || project.units.length === 0) return;
-    const lastUnit = project.units[project.units.length - 1];
-    await sloth.novels.setChapterUnit(activePid, chapterIdToMove, lastUnit.id);
-    await refreshProjects();
-  }
-
   async function addChapter() {
     if (!sloth || !activePid) return;
-    const list = await sloth.novels.createChapter(activePid, `第 ${(project?.chapters.length ?? 0) + 1} 章`);
+    const list = await sloth.novels.createChapter(activePid, `第 ${(project?.chapters.length ?? 0) + 1} 章`, effectiveUnitSel || undefined);
     await refreshProjects();
     const updated = list.find((p) => p.id === activePid);
     const last = updated?.chapters[updated.chapters.length - 1];
     if (last) setChapterId(last.id);
-    setUnitSel("outside"); // 新章节落在单元外，切过去让它立即可见
   }
 
   async function removeChapter() {
@@ -335,13 +315,6 @@ export default function EditorPage({ query }: { query: string }) {
                   </div>
                 );
               })}
-              <div
-                className={`proj-item ${unitSel === "outside" ? "active" : ""}`}
-                onClick={() => setUnitSel("outside")}
-              >
-                <strong>单元外</strong>
-                <small>{outsideChapters.length} 章</small>
-              </div>
             </>
           )}
         </div>
@@ -375,29 +348,10 @@ export default function EditorPage({ query }: { query: string }) {
                       {c.title}
                       <small>{c.words} 字</small>
                     </button>
-                    {unitSel === "outside" ? (
-                      project.units.length > 0 && (
-                        <button
-                          className="icon-button tiny chapter-move"
-                          title="归入最新单元"
-                          onClick={() => void moveChapterIn(c.id)}
-                        >
-                          ⇲
-                        </button>
-                      )
-                    ) : (
-                      <button
-                        className="icon-button tiny chapter-move"
-                        title="移出单元（成为序章等单元外章节）"
-                        onClick={() => void moveChapterOut(c.id)}
-                      >
-                        ⇱
-                      </button>
-                    )}
                   </div>
                 ))}
                 {visibleChapters.length === 0 && (
-                  <div className="unit-empty">{effectiveUnitSel === "outside" ? "单元外暂无章节" : "本单元暂无章节"}</div>
+                  <div className="unit-empty">本单元暂无章节</div>
                 )}
               </div>
               <button className="icon-button" title="新建章节" onClick={addChapter}>
@@ -546,7 +500,13 @@ export default function EditorPage({ query }: { query: string }) {
       {ctxMenu && (
         <>
           <div className="ctx-mask" onClick={() => setCtxMenu(null)} onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }} />
-          <div className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+          <div
+            className="ctx-menu"
+            style={{
+              left: Math.min(ctxMenu.x, window.innerWidth - 140),
+              top: Math.min(ctxMenu.y, window.innerHeight - 130)
+            }}
+          >
             {ctxMenu.kind === "unit" ? (
               <>
                 <button
@@ -580,17 +540,6 @@ export default function EditorPage({ query }: { query: string }) {
                   }}
                 >
                   重命名
-                </button>
-                <button
-                  className="ctx-item"
-                  onClick={() => {
-                    const isOutside = effectiveUnitSel === "outside";
-                    if (isOutside) void moveChapterIn(ctxMenu.id);
-                    else void moveChapterOut(ctxMenu.id);
-                    setCtxMenu(null);
-                  }}
-                >
-                  {effectiveUnitSel === "outside" ? "归入最新单元" : "移出单元"}
                 </button>
                 <button
                   className="ctx-item danger"

@@ -302,11 +302,18 @@ function readMeta(projectId: string): MetaFile {
   return meta;
 }
 
-// 章节归属一致性：只清理已删除章节的悬空引用；单元外章节（如序章）允许存在
+// 章节归属一致性：清理悬空引用；游离章节归入最后一个单元（不存在「单元外」游离态）
 function normalizeUnits(meta: MetaFile): void {
   const units = meta.units ?? [];
   const chapterIds = new Set(meta.chapters.map((c) => c.id));
   for (const u of units) u.chapterIds = u.chapterIds.filter((id) => chapterIds.has(id));
+  const assigned = new Set(units.flatMap((u) => u.chapterIds));
+  const last = units[units.length - 1];
+  if (last) {
+    for (const c of meta.chapters) {
+      if (!assigned.has(c.id)) last.chapterIds.push(c.id);
+    }
+  }
 }
 
 function writeMeta(meta: MetaFile): void {
@@ -439,7 +446,7 @@ function chapterFileName(index: number, title: string): string {
   return `${nn}-${sanitizeName(title)}.md`;
 }
 
-export function createChapter(projectId: string, title: string): NovelProject[] {
+export function createChapter(projectId: string, title: string, unitId?: string): NovelProject[] {
   const meta = readMeta(projectId);
   const now = Date.now();
   const file = chapterFileName(meta.chapters.length + 1, title);
@@ -453,6 +460,10 @@ export function createChapter(projectId: string, title: string): NovelProject[] 
     updatedAt: now
   };
   meta.chapters.push(chapter);
+  // 归入指定单元（编辑器当前选中单元），未指定归最后一个
+  const units = meta.units ?? [];
+  const target = (unitId && units.find((u) => u.id === unitId)) ?? units[units.length - 1];
+  if (target) target.chapterIds.push(chapter.id);
   writeMeta(meta);
   return list();
 }
