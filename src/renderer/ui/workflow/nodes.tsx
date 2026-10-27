@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Handle, Position, useReactFlow, type Node, type NodeProps } from "@xyflow/react";
 import { ChevronDown, Flag, StickyNote, TerminalSquare, UserRound, X } from "lucide-react";
 import { useStudio } from "../../state/store";
@@ -40,18 +40,30 @@ function NodeShell({
 
 function AutoProposalToggle({ id, data }: { id: string; data: WorkflowNodeData }) {
   const { updateNodeData } = useReactFlow<WfNode>();
+  const [warn, setWarn] = useState(false);
+  const tpl = String(data.template ?? data.contextTemplate ?? "");
+  const hasJsonSpec = /targetFile/.test(tpl);
   return (
-    <label
-      className="wf-node-limits nodrag"
-      title="开启后：本节点输出若为提案 JSON 数组，将自动创建到「待审核的记忆提案」（不自动应用）"
-    >
-      <input
-        type="checkbox"
-        checked={Boolean(data.autoProposal)}
-        onChange={(e) => updateNodeData(id, { autoProposal: e.target.checked })}
-      />
-      自动转提案
-    </label>
+    <div className="wf-ap-wrap nodrag">
+      <label
+        className="wf-node-limits"
+        title="开启后：本节点输出若为提案 JSON 数组，将自动创建到「待审核的记忆提案」（不自动应用）"
+      >
+        <input
+          type="checkbox"
+          checked={Boolean(data.autoProposal)}
+          onChange={(e) => {
+            const on = e.target.checked;
+            updateNodeData(id, { autoProposal: on });
+            setWarn(on && !hasJsonSpec);
+          }}
+        />
+        自动转提案
+      </label>
+      {data.autoProposal && (warn || !hasJsonSpec) && (
+        <p className="wf-ap-warn">⚠ 模板里没检测到 targetFile 等 JSON 提案格式要求，运行时可能解析失败</p>
+      )}
+    </div>
   );
 }
 
@@ -121,12 +133,25 @@ export function EndNode({ id, data }: NodeProps<WfNode>) {
 
 export function AgentNode({ id, data }: NodeProps<WfNode>) {
   const agents = useStudio((s) => s.agents);
+  const agentGroups = useStudio((s) => s.agentGroups);
   const { updateNodeData } = useReactFlow<WfNode>();
   const agent = agents.find((a) => a.id === data.agentId) ?? null;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [ctxEditing, setCtxEditing] = useState(false);
-  const filtered = agents.filter((a) => a.name.toLowerCase().includes(query.trim().toLowerCase()));
+  const [groupFilter, setGroupFilter] = useState<string | null>(null); // null=全部 "default"=默认分组
+  const canvasGroup = useStudio((s) => s.canvasAgentGroup);
+  // 画布工具条选了分组时，下拉默认只显示该组（本地 chip 仍可临时切换）
+  useEffect(() => {
+    setGroupFilter(canvasGroup);
+  }, [canvasGroup]);
+  const filtered = agents.filter((a) => {
+    const q = query.trim().toLowerCase();
+    if (q && !a.name.toLowerCase().includes(q)) return false;
+    if (groupFilter === null) return true;
+    if (groupFilter === "default") return !a.groupId;
+    return a.groupId === groupFilter;
+  });
 
   function choose(agentId: string | null) {
     updateNodeData(id, { agentId });
@@ -161,6 +186,22 @@ export function AgentNode({ id, data }: NodeProps<WfNode>) {
         <ChevronDown size={12} className="wf-combo-chevron" />
         {open && (
           <div className="wf-combo-list nodrag nowheel">
+            {agentGroups.length > 0 && (
+              <div className="wf-combo-groups nodrag nowheel">
+                {[{ id: null as string | null, label: "全部" }, { id: "default" as string | null, label: "默认" }, ...agentGroups.map((g) => ({ id: g.id as string | null, label: g.name }))].map((g) => (
+                  <button
+                    key={g.id ?? "all"}
+                    className={`wf-combo-gchip ${groupFilter === g.id ? "active" : ""}`}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      setGroupFilter(g.id);
+                    }}
+                  >
+                    {g.label}
+                  </button>
+                ))}
+              </div>
+            )}
             <button className="wf-combo-item muted" onMouseDown={() => choose(null)}>
               不绑定
             </button>

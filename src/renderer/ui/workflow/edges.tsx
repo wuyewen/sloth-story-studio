@@ -23,7 +23,7 @@ export function LoopBackEdge({ id, sourceX, sourceY, targetX, targetY, style, ma
 
   return (
     <>
-      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} />
+      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} interactionWidth={24} />
       {label && (
         <EdgeLabelRenderer>
           <div

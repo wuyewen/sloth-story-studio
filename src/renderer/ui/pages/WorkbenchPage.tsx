@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BookMarked, FolderTree, Layers, PenLine, Library, Loader2, Play, Square, ChevronRight, Plus,
-  CheckCircle2, XCircle, History
+  CheckCircle2, XCircle, History, Wand2
 } from "lucide-react";
 import { sloth } from "../../api";
 import { useStudio } from "../../state/store";
 import { Modal, ConfirmDialog } from "../components/Modal";
 import type { MemoryFileInfo, MemoryProposal, MemoryVersion, WorkflowRunEvent, WorkflowRunRecord } from "../../../shared/types";
+import CustomFlowModal from "./workbench/CustomFlowModal";
 
 interface TimelineItem {
   key: number;
@@ -99,7 +100,26 @@ export default function WorkbenchPage() {
   const [finalOutput, setFinalOutput] = useState("");
   const [runError, setRunError] = useState("");
   const [propMsg, setPropMsg] = useState<{ text: string; kind: "ok" | "err" } | null>(null);
+  const [chapterMsg, setChapterMsg] = useState("");
+  const [customOpen, setCustomOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const refreshProjects = useStudio((s) => s.refreshProjects);
+
+  // 把工作流输出存入当前单元的新章节
+  async function saveAsChapter(text: string): Promise<string | null> {
+    if (!sloth || !project || !text.trim()) return null;
+    const firstLine = text.split(/\r?\n/).find((l) => l.trim())?.trim() ?? "";
+    const title = firstLine.replace(/^#+\s*/, "").slice(0, 12) || `第 ${unitChapters.length + 1} 章`;
+    const list = await sloth.novels.createChapter(project.id, title);
+    const updated = list.find((p) => p.id === project.id);
+    const created = updated?.chapters[updated.chapters.length - 1];
+    if (created) {
+      await sloth.novels.writeChapter(project.id, created.id, text);
+      if (unit) await sloth.novels.setChapterUnit(project.id, created.id, unit.id);
+    }
+    await refreshProjects();
+    return created?.title ?? null;
+  }
 
   function toggleExpand(key: number) {
     setExpanded((s) => {
@@ -125,6 +145,7 @@ export default function WorkbenchPage() {
     setFinalOutput("");
     setRunError("");
     setPropMsg(null);
+    setChapterMsg("");
   }
 
   function startRun() {
@@ -173,6 +194,13 @@ export default function WorkbenchPage() {
         if (res?.finalOutput) setFinalOutput(res.finalOutput);
         if (res?.proposalsCreated) setPropMsg({ kind: "ok", text: `已自动创建 ${res.proposalsCreated} 条记忆提案，请到「待审核的记忆提案」查看并确认。` });
         if (res?.proposalsError) setPropMsg({ kind: "err", text: `提案解析失败：${res.proposalsError}（节点输出需为 JSON 数组）` });
+        // 「章节创作」槽位的工作流：终稿自动存入当前单元的新章节
+        const isChapterWf = project.workflowSlots?.chapter === runWf.id || runWf.name.includes("章节创作");
+        if (res?.finalOutput && isChapterWf) {
+          void saveAsChapter(res.finalOutput).then((t) => {
+            if (t) setChapterMsg(`已自动存入新章节《${t}》（当前单元）`);
+          });
+        }
         setRunning(false);
         void refreshRuns();
         void refreshProposals();
@@ -372,11 +400,7 @@ export default function WorkbenchPage() {
           <div className="wb-head">
             <div className="wb-proj">
               <div className="wb-proj-row">
-                <select className="text-input wb-proj-select" value={project.id} onChange={(e) => { setProjectId(e.target.value); setCurrentProject(e.target.value); setUnitId(""); }}>
-                  {projects.map((p) => (
-                    <option key={p.id} value={p.id}>{p.title}</option>
-                  ))}
-                </select>
+                <strong className="wb-proj-title">{project.title}</strong>
                 <span className="wb-local-badge">本地项目</span>
               </div>
               {project.synopsis && <p className="wb-synopsis">{project.synopsis}</p>}
@@ -412,6 +436,12 @@ export default function WorkbenchPage() {
               <span className="wb-action-icon"><Library size={18} /></span>
               <strong>管理共享记忆</strong>
               <small>查看 · 编辑 · 审核变更</small>
+              <ChevronRight size={15} className="wb-action-arrow" />
+            </button>
+            <button className="wb-action" onClick={() => setCustomOpen(true)}>
+              <span className="wb-action-icon"><Wand2 size={18} /></span>
+              <strong>自定义创作流水线</strong>
+              <small>描述风格 · 自动生成 Agent + 工作流</small>
               <ChevronRight size={15} className="wb-action-arrow" />
             </button>
           </div>
@@ -559,6 +589,12 @@ export default function WorkbenchPage() {
               </div>
               <div className="ai-output">{finalOutput}</div>
               {propMsg && <p className={`inline-msg ${propMsg.kind}`}>{propMsg.text}</p>}
+              {chapterMsg && <p className="inline-msg ok">{chapterMsg}</p>}
+              <div className="output-actions">
+                <button className="ghost-button small" onClick={() => void saveAsChapter(finalOutput).then((t) => t && setChapterMsg(`已存入新章节《${t}》（当前单元）`))}>
+                  存入新章节
+                </button>
+              </div>
             </>
           )}
         </Modal>
@@ -771,6 +807,10 @@ export default function WorkbenchPage() {
             </button>
           </div>
         </Modal>
+      )}
+
+      {customOpen && project && (
+        <CustomFlowModal projectId={project.id} projectTitle={project.title} onClose={() => setCustomOpen(false)} />
       )}
 
       {memDeleting && (

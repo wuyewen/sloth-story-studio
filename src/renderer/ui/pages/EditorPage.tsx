@@ -32,6 +32,42 @@ export default function EditorPage({ query }: { query: string }) {
   const [saveState, setSaveState] = useState<"saved" | "pending" | "saving">("saved");
 
   const [createOpen, setCreateOpen] = useState(false);
+  const [unitOpen, setUnitOpen] = useState(false);
+  const [unitTitle, setUnitTitle] = useState("");
+  const [renamingUnit, setRenamingUnit] = useState<string | null>(null);
+  const [unitRenameTitle, setUnitRenameTitle] = useState("");
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; kind: "unit" | "chapter"; id: string; title: string } | null>(null);
+  const [renamingChapter, setRenamingChapter] = useState<{ id: string; title: string } | null>(null);
+  const [chapterRenameTitle, setChapterRenameTitle] = useState("");
+  const [deletingUnit, setDeletingUnit] = useState<{ id: string; title: string } | null>(null);
+
+  async function confirmDeleteUnit() {
+    if (!sloth || !activePid || !deletingUnit) return;
+    await sloth.novels.deleteUnit(activePid, deletingUnit.id);
+    await refreshProjects();
+    if (unitSel === deletingUnit.id) setUnitSel("");
+    setDeletingUnit(null);
+  }
+
+  async function confirmRenameChapter() {
+    if (!sloth || !activePid || !renamingChapter || !chapterRenameTitle.trim()) {
+      setRenamingChapter(null);
+      return;
+    }
+    await sloth.novels.renameChapter(activePid, renamingChapter.id, chapterRenameTitle.trim());
+    await refreshProjects();
+    setRenamingChapter(null);
+  }
+
+  async function confirmRenameUnit() {
+    if (!sloth || !activePid || !renamingUnit || !unitRenameTitle.trim()) {
+      setRenamingUnit(null);
+      return;
+    }
+    await sloth.novels.renameUnit(activePid, renamingUnit, unitRenameTitle.trim());
+    await refreshProjects();
+    setRenamingUnit(null);
+  }
   const [newTitle, setNewTitle] = useState("");
   const [newSynopsis, setNewSynopsis] = useState("");
   const [renaming, setRenaming] = useState<NovelProject | null>(null);
@@ -46,7 +82,26 @@ export default function EditorPage({ query }: { query: string }) {
   contentRef.current = content;
 
   const project = projects.find((p) => p.id === (projectId ?? currentProjectId)) ?? projects[0] ?? null;
+  const activePid = project?.id ?? null; // 实际生效的项目 id（本地选择或侧边栏全局选择）
   const chapter = project?.chapters.find((c) => c.id === chapterId) ?? null;
+
+  // 左栏单元选择：默认最新单元；「outside」= 单元外章节（序章等）
+  const [unitSel, setUnitSel] = useState<string>("");
+  const outsideChapters = useMemo(() => {
+    if (!project) return [];
+    const assigned = new Set(project.units.flatMap((u) => u.chapterIds));
+    return project.chapters.filter((c) => !assigned.has(c.id));
+  }, [project]);
+  const effectiveUnitSel = unitSel || (project?.units[project.units.length - 1]?.id ?? "outside");
+  const visibleChapters = useMemo(() => {
+    if (!project) return [];
+    if (effectiveUnitSel === "outside") return outsideChapters;
+    const u = project.units.find((x) => x.id === effectiveUnitSel);
+    if (!u) return outsideChapters;
+    return u.chapterIds
+      .map((id) => project.chapters.find((c) => c.id === id))
+      .filter((c): c is NonNullable<typeof c> => Boolean(c));
+  }, [project, effectiveUnitSel, outsideChapters]);
 
   const shownProjects = useMemo(
     () => projects.filter((p) => p.title.toLowerCase().includes(query.toLowerCase())),
@@ -87,9 +142,9 @@ export default function EditorPage({ query }: { query: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    if (!sloth || !projectId || !chapterId) return;
+    if (!sloth || !activePid || !chapterId) return;
     void flushRef.current();
-    void sloth.novels.readChapter(projectId, chapterId).then((text) => {
+    void sloth.novels.readChapter(activePid, chapterId).then((text) => {
       if (!cancelled) {
         setContent(text);
         setView("edit");
@@ -99,19 +154,19 @@ export default function EditorPage({ query }: { query: string }) {
     return () => {
       cancelled = true;
     };
-  }, [projectId, chapterId]);
+  }, [activePid, chapterId]);
 
   function updateContent(next: string) {
     setContent(next);
-    if (!projectId || !chapterId) return;
-    pendingRef.current = { pid: projectId, cid: chapterId, text: next };
+    if (!activePid || !chapterId) return;
+    pendingRef.current = { pid: activePid, cid: chapterId, text: next };
     setSaveState("pending");
     window.clearTimeout(timerRef.current);
     timerRef.current = window.setTimeout(() => void flushRef.current(), 800);
   }
 
   function selectProject(id: string) {
-    if (id === projectId) return;
+    if (id === activePid) return;
     void flushRef.current();
     setProjectId(id);
     setCurrentProject(id);
@@ -148,24 +203,49 @@ export default function EditorPage({ query }: { query: string }) {
   }
 
   async function addUnit() {
-    if (!sloth || !projectId) return;
-    const title = window.prompt("新单元名称（如：第 2 单元 · 修仙篇）", `第 ${(project?.units.length ?? 0) + 1} 单元`);
-    if (!title?.trim()) return;
-    await sloth.novels.createUnit(projectId, title.trim());
+    // 按现有最大编号+1（改名/删除后不重号）：第1单元、第3单元 → 新的是第4单元
+    const nums = (project?.units ?? [])
+      .map((u) => /第\s*(\d+)\s*单元/.exec(u.title)?.[1])
+      .filter((n): n is string => Boolean(n))
+      .map(Number);
+    const next = nums.length > 0 ? Math.max(...nums) + 1 : 1; // 序章这类改名单元不占编号
+    setUnitTitle(`第 ${next} 单元`);
+    setUnitOpen(true);
+  }
+
+  async function confirmAddUnit() {
+    if (!sloth || !activePid || !unitTitle.trim()) return;
+    await sloth.novels.createUnit(activePid, unitTitle.trim());
+    await refreshProjects();
+    setUnitOpen(false);
+  }
+
+  async function moveChapterOut(chapterIdToMove: string) {
+    if (!sloth || !activePid) return;
+    await sloth.novels.unsetChapterUnit(activePid, chapterIdToMove);
     await refreshProjects();
   }
 
-  async function addChapter() {    if (!sloth || !projectId) return;
-    const list = await sloth.novels.createChapter(projectId, `第 ${(project?.chapters.length ?? 0) + 1} 章`);
+  async function moveChapterIn(chapterIdToMove: string) {
+    if (!sloth || !activePid || !project || project.units.length === 0) return;
+    const lastUnit = project.units[project.units.length - 1];
+    await sloth.novels.setChapterUnit(activePid, chapterIdToMove, lastUnit.id);
     await refreshProjects();
-    const updated = list.find((p) => p.id === projectId);
+  }
+
+  async function addChapter() {
+    if (!sloth || !activePid) return;
+    const list = await sloth.novels.createChapter(activePid, `第 ${(project?.chapters.length ?? 0) + 1} 章`);
+    await refreshProjects();
+    const updated = list.find((p) => p.id === activePid);
     const last = updated?.chapters[updated.chapters.length - 1];
     if (last) setChapterId(last.id);
+    setUnitSel("outside"); // 新章节落在单元外，切过去让它立即可见
   }
 
   async function removeChapter() {
-    if (!sloth || !projectId || !deletingChapter) return;
-    await sloth.novels.deleteChapter(projectId, deletingChapter.id);
+    if (!sloth || !activePid || !deletingChapter) return;
+    await sloth.novels.deleteChapter(activePid, deletingChapter.id);
     if (chapterId === deletingChapter.id) {
       setChapterId(null);
       setContent("");
@@ -177,14 +257,14 @@ export default function EditorPage({ query }: { query: string }) {
   function handleInsert(text: string, mode: InsertMode) {
     if (mode === "chapter") {
       void (async () => {
-        if (!sloth || !projectId) return;
+        if (!sloth || !activePid) return;
         const firstLine = text.split(/\r?\n/).find((l) => l.trim())?.trim() ?? "";
         const title = firstLine ? firstLine.slice(0, 12) : "AI 生成章节";
-        const list = await sloth.novels.createChapter(projectId, title);
-        const updated = list.find((p) => p.id === projectId);
+        const list = await sloth.novels.createChapter(activePid, title);
+        const updated = list.find((p) => p.id === activePid);
         const last = updated?.chapters[updated.chapters.length - 1];
         if (last) {
-          await sloth.novels.writeChapter(projectId, last.id, text);
+          await sloth.novels.writeChapter(activePid, last.id, text);
           await refreshProjects();
           setChapterId(last.id);
         }
@@ -215,44 +295,55 @@ export default function EditorPage({ query }: { query: string }) {
     <div className="editor-grid">
       <div className="editor-col proj-col">
         <div className="col-head">
-          <span>项目</span>
-          <button className="icon-button" title="新建项目" onClick={() => setCreateOpen(true)}>
-            <Plus size={16} />
-          </button>
+          <span>{project ? `${project.title} · 单元` : "单元"}</span>
+          {project && (
+            <button className="icon-button" title="新建单元" onClick={addUnit}>
+              <FolderPlus size={16} />
+            </button>
+          )}
         </div>
         <div className="proj-list">
-          {shownProjects.map((p) => (
-            <div key={p.id} className={`proj-item ${p.id === projectId ? "active" : ""}`} onClick={() => selectProject(p.id)}>
-              <strong>{p.title}</strong>
-              <small>
-                {p.chapters.length} 章 · {fmtTime(p.updatedAt)}
-              </small>
-              <div className="proj-item-actions">
-                <button
-                  className="icon-button tiny"
-                  title="重命名"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setRenaming(p);
-                    setRenameTitle(p.title);
-                  }}
-                >
-                  <Pencil size={13} />
-                </button>
-                <button
-                  className="icon-button tiny danger-text"
-                  title="删除"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDeletingProject(p);
-                  }}
-                >
-                  <Trash2 size={13} />
-                </button>
+          {!project && <p className="model-empty">先在左侧导航选择一本书。</p>}
+          {project && (
+            <>
+              {project.units.map((u) => {
+                const count = u.chapterIds.filter((id) => project.chapters.some((c) => c.id === id)).length;
+                return (
+                  <div
+                    key={u.id}
+                    className={`proj-item ${u.id === effectiveUnitSel ? "active" : ""}`}
+                    onClick={() => setUnitSel(u.id)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setCtxMenu({ x: e.clientX, y: e.clientY, kind: "unit", id: u.id, title: u.title });
+                    }}
+                  >
+                    {renamingUnit === u.id ? (
+                      <input
+                        className="text-input unit-rename-input"
+                        autoFocus
+                        value={unitRenameTitle}
+                        onChange={(e) => setUnitRenameTitle(e.target.value)}
+                        onBlur={() => void confirmRenameUnit()}
+                        onKeyDown={(e) => e.key === "Enter" && void confirmRenameUnit()}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    ) : (
+                      <strong onDoubleClick={(e) => { e.stopPropagation(); setRenamingUnit(u.id); setUnitRenameTitle(u.title); }} title="双击重命名">{u.title}</strong>
+                    )}
+                    <small>{count} 章</small>
+                  </div>
+                );
+              })}
+              <div
+                className={`proj-item ${unitSel === "outside" ? "active" : ""}`}
+                onClick={() => setUnitSel("outside")}
+              >
+                <strong>单元外</strong>
+                <small>{outsideChapters.length} 章</small>
               </div>
-            </div>
-          ))}
-          {shownProjects.length === 0 && <p className="model-empty">{query ? "没有匹配的项目。" : "还没有项目，点击右上角新建。"}</p>}
+            </>
+          )}
         </div>
       </div>
 
@@ -267,32 +358,48 @@ export default function EditorPage({ query }: { query: string }) {
           <>
             <div className="chapter-bar">
               <div className="chapter-tabs">
-                {(project.units ?? []).map((u) => {
-                  const unitChapters = u.chapterIds
-                    .map((id) => project.chapters.find((c) => c.id === id))
-                    .filter((c): c is NonNullable<typeof c> => Boolean(c));
-                  return (
-                    <div key={u.id} className="unit-group">
-                      <div className="unit-head">{u.title}</div>
-                      {unitChapters.map((c) => (
+                {visibleChapters.map((c) => (
+                  <div
+                    key={c.id}
+                    className="chapter-tab-row"
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setCtxMenu({ x: e.clientX, y: e.clientY, kind: "chapter", id: c.id, title: c.title });
+                    }}
+                  >
+                    <button
+                      className={`chapter-tab ${c.id === chapterId ? "active" : ""}`}
+                      onClick={() => selectChapter(c.id)}
+                      title={`${c.words} 字`}
+                    >
+                      {c.title}
+                      <small>{c.words} 字</small>
+                    </button>
+                    {unitSel === "outside" ? (
+                      project.units.length > 0 && (
                         <button
-                          key={c.id}
-                          className={`chapter-tab ${c.id === chapterId ? "active" : ""}`}
-                          onClick={() => selectChapter(c.id)}
-                          title={`${c.words} 字`}
+                          className="icon-button tiny chapter-move"
+                          title="归入最新单元"
+                          onClick={() => void moveChapterIn(c.id)}
                         >
-                          {c.title}
-                          <small>{c.words} 字</small>
+                          ⇲
                         </button>
-                      ))}
-                      {unitChapters.length === 0 && <div className="unit-empty">暂无章节</div>}
-                    </div>
-                  );
-                })}
+                      )
+                    ) : (
+                      <button
+                        className="icon-button tiny chapter-move"
+                        title="移出单元（成为序章等单元外章节）"
+                        onClick={() => void moveChapterOut(c.id)}
+                      >
+                        ⇱
+                      </button>
+                    )}
+                  </div>
+                ))}
+                {visibleChapters.length === 0 && (
+                  <div className="unit-empty">{effectiveUnitSel === "outside" ? "单元外暂无章节" : "本单元暂无章节"}</div>
+                )}
               </div>
-              <button className="icon-button" title="新建单元" onClick={addUnit}>
-                <FolderPlus size={16} />
-              </button>
               <button className="icon-button" title="新建章节" onClick={addChapter}>
                 <FilePlus2 size={16} />
               </button>
@@ -414,6 +521,118 @@ export default function EditorPage({ query }: { query: string }) {
           onCancel={() => setDeletingChapter(null)}
           onConfirm={removeChapter}
         />
+      )}
+
+      {unitOpen && (
+        <Modal title="新建单元" onClose={() => setUnitOpen(false)} width={400}>
+          <label className="form-row">
+            <span className="form-label">单元名称</span>
+            <input
+              className="text-input"
+              autoFocus
+              value={unitTitle}
+              onChange={(e) => setUnitTitle(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void confirmAddUnit()}
+              placeholder="如：第 2 单元 · 修仙篇"
+            />
+          </label>
+          <div className="modal-actions">
+            <button className="ghost-button" onClick={() => setUnitOpen(false)}>取消</button>
+            <button className="primary-button" disabled={!unitTitle.trim()} onClick={() => void confirmAddUnit()}>创建</button>
+          </div>
+        </Modal>
+      )}
+
+      {ctxMenu && (
+        <>
+          <div className="ctx-mask" onClick={() => setCtxMenu(null)} onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }} />
+          <div className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+            {ctxMenu.kind === "unit" ? (
+              <>
+                <button
+                  className="ctx-item"
+                  onClick={() => {
+                    setRenamingUnit(ctxMenu.id);
+                    setUnitRenameTitle(ctxMenu.title);
+                    setCtxMenu(null);
+                  }}
+                >
+                  重命名
+                </button>
+                <button
+                  className="ctx-item danger"
+                  onClick={() => {
+                    setDeletingUnit({ id: ctxMenu.id, title: ctxMenu.title });
+                    setCtxMenu(null);
+                  }}
+                >
+                  删除单元
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  className="ctx-item"
+                  onClick={() => {
+                    setRenamingChapter({ id: ctxMenu.id, title: ctxMenu.title });
+                    setChapterRenameTitle(ctxMenu.title);
+                    setCtxMenu(null);
+                  }}
+                >
+                  重命名
+                </button>
+                <button
+                  className="ctx-item"
+                  onClick={() => {
+                    const isOutside = effectiveUnitSel === "outside";
+                    if (isOutside) void moveChapterIn(ctxMenu.id);
+                    else void moveChapterOut(ctxMenu.id);
+                    setCtxMenu(null);
+                  }}
+                >
+                  {effectiveUnitSel === "outside" ? "归入最新单元" : "移出单元"}
+                </button>
+                <button
+                  className="ctx-item danger"
+                  onClick={() => {
+                    setDeletingChapter({ id: ctxMenu.id, title: ctxMenu.title });
+                    setCtxMenu(null);
+                  }}
+                >
+                  删除章节
+                </button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+
+      {deletingUnit && (
+        <ConfirmDialog
+          title="删除单元"
+          message={`确定删除单元「${deletingUnit.title}」吗？单元内的章节不会被删除，会移到「单元外」。`}
+          onCancel={() => setDeletingUnit(null)}
+          onConfirm={() => void confirmDeleteUnit()}
+        />
+      )}
+
+      {renamingChapter && (
+        <Modal title="重命名章节" onClose={() => setRenamingChapter(null)} width={400}>
+          <label className="form-row">
+            <span className="form-label">章节名</span>
+            <input
+              className="text-input"
+              autoFocus
+              value={chapterRenameTitle}
+              onChange={(e) => setChapterRenameTitle(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void confirmRenameChapter()}
+            />
+          </label>
+          <div className="modal-actions">
+            <button className="ghost-button" onClick={() => setRenamingChapter(null)}>取消</button>
+            <button className="primary-button" disabled={!chapterRenameTitle.trim()} onClick={() => void confirmRenameChapter()}>保存</button>
+          </div>
+        </Modal>
       )}
     </div>
   );

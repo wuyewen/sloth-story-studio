@@ -98,6 +98,7 @@ export function memoryList(projectId: string): MemoryFileInfo[] {
   const out: MemoryFileInfo[] = [];
   const walk = (dir: string) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith(".")) continue; // 跳过 .history 等隐藏目录/文件
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         walk(full);
@@ -147,7 +148,9 @@ function historyDir(projectId: string): string {
 }
 
 function historyName(rel: string, ts: number): string {
-  return `${rel.replace(/[/\\]/g, "__")}.${ts}.md`;
+  const d = new Date(ts);
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}${String(d.getSeconds()).padStart(2, "0")}`;
+  return `${rel.replace(/[/\\]/g, "__")}.${stamp}.md`;
 }
 
 function snapshotMemory(projectId: string, rel: string, content: string): void {
@@ -166,22 +169,46 @@ function snapshotMemory(projectId: string, rel: string, content: string): void {
 export function memoryHistory(projectId: string, rel: string): MemoryVersion[] {
   const dir = historyDir(projectId);
   const prefix = `${rel.replace(/[/\\]/g, "__")}.`;
+  const parseStamp = (s: string): number => {
+    if (/^\d{8}-\d{6}$/.test(s)) {
+      return new Date(
+        Number(s.slice(0, 4)), Number(s.slice(4, 6)) - 1, Number(s.slice(6, 8)),
+        Number(s.slice(9, 11)), Number(s.slice(11, 13)), Number(s.slice(13, 15))
+      ).getTime();
+    }
+    return Number(s); // 旧的毫秒时间戳格式
+  };
   return fs
     .readdirSync(dir)
     .filter((f) => f.startsWith(prefix) && f.endsWith(".md"))
     .map((f) => {
-      const ts = Number(f.slice(prefix.length, -3));
+      const ts = parseStamp(f.slice(prefix.length, -3));
       const stat = fs.statSync(path.join(dir, f));
       return { ts, size: stat.size };
     })
-    .filter((v) => Number.isFinite(v.ts))
+    .filter((v) => Number.isFinite(v.ts) && v.ts > 0)
     .sort((a, b) => b.ts - a.ts);
 }
 
 export function memoryReadVersion(projectId: string, rel: string, ts: number): string {
-  const file = path.join(historyDir(projectId), historyName(rel, ts));
-  if (!fs.existsSync(file)) throw new Error("版本不存在");
-  return fs.readFileSync(file, "utf-8");
+  const dir = historyDir(projectId);
+  const prefix = `${rel.replace(/[/\\]/g, "__")}.`;
+  const parseStamp = (s: string): number => {
+    if (/^\d{8}-\d{6}$/.test(s)) {
+      return new Date(
+        Number(s.slice(0, 4)), Number(s.slice(4, 6)) - 1, Number(s.slice(6, 8)),
+        Number(s.slice(9, 11)), Number(s.slice(11, 13)), Number(s.slice(13, 15))
+      ).getTime();
+    }
+    return Number(s);
+  };
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.startsWith(prefix) || !f.endsWith(".md")) continue;
+    if (parseStamp(f.slice(prefix.length, -3)) === ts) {
+      return fs.readFileSync(path.join(dir, f), "utf-8");
+    }
+  }
+  throw new Error("版本不存在");
 }
 
 export function memoryRestore(projectId: string, rel: string, ts: number): void {
@@ -275,18 +302,11 @@ function readMeta(projectId: string): MetaFile {
   return meta;
 }
 
-// 章节归属一致性：新章节归入最后一个单元；被删除的章节从 units 中清除
+// 章节归属一致性：只清理已删除章节的悬空引用；单元外章节（如序章）允许存在
 function normalizeUnits(meta: MetaFile): void {
   const units = meta.units ?? [];
   const chapterIds = new Set(meta.chapters.map((c) => c.id));
   for (const u of units) u.chapterIds = u.chapterIds.filter((id) => chapterIds.has(id));
-  const assigned = new Set(units.flatMap((u) => u.chapterIds));
-  const last = units[units.length - 1];
-  if (last) {
-    for (const c of meta.chapters) {
-      if (!assigned.has(c.id)) last.chapterIds.push(c.id);
-    }
-  }
 }
 
 function writeMeta(meta: MetaFile): void {
@@ -425,13 +445,23 @@ export function createChapter(projectId: string, title: string): NovelProject[] 
   const file = chapterFileName(meta.chapters.length + 1, title);
   const filePath = path.join(projectDirOf(projectId), "chapters", file);
   fs.writeFileSync(filePath, "", "utf-8");
-  meta.chapters.push({
+  const chapter: ChapterMeta = {
     id: newId(),
     title: title.trim() || `第 ${meta.chapters.length + 1} 章`,
     file,
     words: 0,
     updatedAt: now
-  });
+  };
+  meta.chapters.push(chapter);
+  writeMeta(meta);
+  return list();
+}
+
+// 把章节移出所有单元（序章等独立于单元的章节）
+export function unsetChapterUnit(projectId: string, chapterId: string): NovelProject[] {
+  const meta = readMeta(projectId);
+  findChapter(meta, chapterId);
+  for (const u of meta.units ?? []) u.chapterIds = u.chapterIds.filter((id) => id !== chapterId);
   writeMeta(meta);
   return list();
 }
@@ -492,6 +522,23 @@ export function renameUnit(projectId: string, unitId: string, title: string): No
   const unit = meta.units?.find((u) => u.id === unitId);
   if (!unit) throw new Error("单元不存在");
   unit.title = title.trim() || unit.title;
+  writeMeta(meta);
+  return list();
+}
+
+export function renameChapter(projectId: string, chapterId: string, title: string): NovelProject[] {
+  const meta = readMeta(projectId);
+  const chapter = findChapter(meta, chapterId);
+  chapter.title = title.trim() || chapter.title;
+  chapter.updatedAt = Date.now();
+  writeMeta(meta);
+  return list();
+}
+
+// 删除单元：组内章节落到「单元外」，不删章节本身
+export function deleteUnit(projectId: string, unitId: string): NovelProject[] {
+  const meta = readMeta(projectId);
+  meta.units = (meta.units ?? []).filter((u) => u.id !== unitId);
   writeMeta(meta);
   return list();
 }

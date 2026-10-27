@@ -75,6 +75,9 @@ export default function Canvas({
   const [runError, setRunError] = useState("");
 
   const providers = useStudio((s) => s.providers);
+  const agentGroups = useStudio((s) => s.agentGroups);
+  const canvasAgentGroup = useStudio((s) => s.canvasAgentGroup);
+  const setCanvasAgentGroup = useStudio((s) => s.setCanvasAgentGroup);
   const enabledProviders = providers.filter((p) => p.enabled);
   const [optOpen, setOptOpen] = useState(false);
   const [optText, setOptText] = useState("");
@@ -465,6 +468,18 @@ export default function Canvas({
                 <option key={a.kind} value={a.kind}>
                   {a.label}
                 </option>
+              ))}
+            </select>
+            <select
+              className="text-input wf-add"
+              value={canvasAgentGroup ?? ""}
+              onChange={(e) => setCanvasAgentGroup(e.target.value || null)}
+              title="节点选择器只显示该分组的 Agent"
+            >
+              <option value="">Agent：全部分组</option>
+              <option value="default">Agent：默认分组</option>
+              {agentGroups.map((g) => (
+                <option key={g.id} value={g.id}>Agent：{g.name}</option>
               ))}
             </select>
             <span className="wf-save-state">{saveState === "saved" ? "已保存" : saveState === "saving" ? "保存中…" : "有未保存修改"}</span>
