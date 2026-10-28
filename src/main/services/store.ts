@@ -54,7 +54,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   novelDir: "",
   backgroundImage: null,
   agentDir: "",
-  workflowDir: ""
+  workflowDir: "",
+  styleDir: ""
 };
 
 export function readSettings(): AppSettings {
@@ -82,6 +83,10 @@ function agentsFile(): string {
 
 function workflowsFile(): string {
   return customFile(readSettings().workflowDir, "workflows.json");
+}
+
+export function stylesFile(): string {
+  return customFile(readSettings().styleDir, "styles.json");
 }
 
 // 目录切换时把现有内容迁移到新位置（目标已存在则不覆盖）

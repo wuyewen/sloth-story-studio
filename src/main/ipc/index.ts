@@ -10,6 +10,10 @@ import type {
   ModelProviderInfo,
   ModelProviderInput,
   ProposalInput,
+  StateEntity,
+  StateEntityInput,
+  StateExtractItem,
+  StyleProfileInput,
   WorkflowEdge,
   WorkflowInput,
   WorkflowNode
@@ -32,7 +36,9 @@ import {
 import { decryptKey, encryptKey } from "../services/crypto.js";
 import { abortStream, chat, chatStream } from "../services/llmClient.js";
 import * as novelFs from "../services/novelFs.js";
+import * as novelState from "../services/novelState.js";
 import * as proposals from "../services/proposals.js";
+import * as styleStore from "../services/styleStore.js";
 import * as workflowEngine from "../services/workflowEngine.js";
 import { openConfigWindow } from "../windows.js";
 
@@ -81,6 +87,7 @@ export function registerIpc(): void {
         model: input.model,
         displayName: input.displayName,
         enableThinking: input.enableThinking,
+        sendTemperature: input.sendTemperature !== false,
         contextLength: input.contextLength,
         enabled: input.enabled,
         updatedAt: now,
@@ -94,6 +101,7 @@ export function registerIpc(): void {
         model: input.model,
         displayName: input.displayName,
         enableThinking: input.enableThinking,
+        sendTemperature: input.sendTemperature !== false,
         contextLength: input.contextLength,
         enabled: input.enabled,
         createdAt: now,
@@ -128,6 +136,7 @@ export function registerIpc(): void {
           model: input.model,
           displayName: input.displayName,
           enableThinking: input.enableThinking,
+          sendTemperature: input.sendTemperature !== false,
           contextLength: input.contextLength,
           enabled: input.enabled,
           createdAt: now,
@@ -153,6 +162,9 @@ export function registerIpc(): void {
     }
     if (patch.workflowDir && patch.workflowDir !== prev.workflowDir) {
       migrateStoreFile("workflows.json", patch.workflowDir);
+    }
+    if (patch.styleDir && patch.styleDir !== prev.styleDir) {
+      migrateStoreFile("styles.json", patch.styleDir);
     }
     const next = { ...prev, ...patch };
     writeSettings(next);
@@ -276,7 +288,7 @@ export function registerIpc(): void {
   );
   ipcMain.handle("novels:rename", (_e, id: string, title: string) => novelFs.rename(id, title));
 
-  ipcMain.handle("novels:updateMeta", (_e, id: string, patch: { title?: string; synopsis?: string }) =>
+  ipcMain.handle("novels:updateMeta", (_e, id: string, patch: { title?: string; synopsis?: string; styleId?: string | null }) =>
     novelFs.updateMeta(id, patch)
   );
 
@@ -303,8 +315,20 @@ export function registerIpc(): void {
   );
   ipcMain.handle(
     "novels:writeChapter",
-    (_e, projectId: string, chapterId: string, content: string) =>
-      novelFs.writeChapter(projectId, chapterId, content)
+    (_e, projectId: string, chapterId: string, content: string, source?: string) =>
+      novelFs.writeChapter(projectId, chapterId, content, source)
+  );
+
+  ipcMain.handle("novels:chapterVersions", (_e, projectId: string, chapterId: string) =>
+    novelFs.chapterVersions(projectId, chapterId)
+  );
+
+  ipcMain.handle("novels:chapterVersionRead", (_e, projectId: string, chapterId: string, ts: number) =>
+    novelFs.chapterVersionRead(projectId, chapterId, ts)
+  );
+
+  ipcMain.handle("novels:chapterRollback", (_e, projectId: string, chapterId: string, ts: number) =>
+    novelFs.chapterRollback(projectId, chapterId, ts)
   );
 
   ipcMain.handle("novels:createUnit", (_e, projectId: string, title: string) =>
@@ -363,6 +387,127 @@ export function registerIpc(): void {
 
   ipcMain.handle("novels:revealArtifact", (_e, projectId: string, rel: string) =>
     novelFs.revealArtifact(projectId, rel)
+  );
+
+  // ---- 结构化状态库（FR-03）----
+
+  ipcMain.handle("novels:stateList", (_e, projectId: string) => novelState.load(projectId));
+
+  ipcMain.handle("novels:stateUpsert", (_e, projectId: string, input: StateEntityInput) =>
+    novelState.upsert(projectId, input)
+  );
+
+  ipcMain.handle("novels:stateRemove", (_e, projectId: string, id: string) =>
+    novelState.remove(projectId, id)
+  );
+
+  ipcMain.handle("novels:stateSetLock", (_e, projectId: string, id: string, locked: boolean) =>
+    novelState.setLock(projectId, id, locked)
+  );
+
+  // ---- 风格模板（FR-06，应用级存储）----
+
+  ipcMain.handle("styles:list", () => styleStore.list());
+
+  ipcMain.handle("styles:create", (_e, input: StyleProfileInput) => styleStore.create(input));
+
+  ipcMain.handle("styles:update", (_e, id: string, input: StyleProfileInput) =>
+    styleStore.update(id, input)
+  );
+
+  ipcMain.handle("styles:duplicate", (_e, id: string) => styleStore.duplicate(id));
+
+  ipcMain.handle("styles:delete", (_e, id: string) => styleStore.remove(id));
+
+  ipcMain.handle("styles:listHistory", (_e, id: string) => styleStore.listHistory(id));
+
+  ipcMain.handle("styles:restoreVersion", (_e, id: string, version: number) =>
+    styleStore.restoreVersion(id, version)
+  );
+
+  // ---- 章节记忆提取（FR-04）：解析后不落库，返回提案列表给渲染端审阅 ----
+
+  ipcMain.handle(
+    "novels:extractChapterState",
+    async (
+      _e,
+      projectId: string,
+      chapterRef: { unitId?: string; chapterId: string }
+    ): Promise<{ chapterTitle: string; items: StateExtractItem[] }> => {
+      const project = novelFs.list().find((p) => p.id === projectId);
+      const chapter = project?.chapters.find((c) => c.id === chapterRef.chapterId);
+      if (!project || !chapter) throw new Error("章节不存在");
+      const content = novelFs.readChapter(projectId, chapterRef.chapterId);
+      if (!content.trim()) throw new Error(`章节《${chapter.title}》还没有正文内容`);
+
+      const record = readModels().find((m) => m.enabled);
+      if (!record) throw new Error("没有可用的大模型配置，请先在设置中启用一个模型");
+      const { apiKeyEnc: _enc, ...provider } = record;
+
+      const existing = novelState.load(projectId);
+      const existingSummary =
+        existing.length > 0
+          ? existing
+              .map((e) => `- [${e.type}] ${e.name}（${e.status === "confirmed" ? "已确认" : "推断"}）：${e.data.slice(0, 200)}`)
+              .join("\n")
+          : "（暂无）";
+
+      const system = `你是小说创作的状态提取助手。从章节正文中提取结构化状态实体，只输出一个 JSON 数组，不要输出任何其他文字。
+元素格式：{"type":"character|foreshadowing|event|item|rule|location","name":"实体名","data":"状态描述（简明 markdown）","status":"confirmed|inferred"}
+规则：
+- type 只能是六种之一：character 角色、foreshadowing 伏笔、event 事件、item 物品、rule 规则/设定、location 地点。
+- 正文明确写出的事实 status 填 confirmed；推测、暗示填 inferred。
+- 只提取本章新增或发生变化的事实；已有实体没有变化就不要重复输出。
+- 只输出 JSON 数组，不要 markdown 代码围栏，不要解释。`;
+
+      const user = `章节标题：${chapter.title}
+
+已有实体（供判重，无需重复输出无变化项）：
+${existingSummary}
+
+章节正文：
+${content}`;
+
+      const raw = await chat(provider, getKey(record.id), [
+        { role: "system", content: system },
+        { role: "user", content: user }
+      ]);
+
+      const fenced = raw.trim().match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+      const text = fenced ? fenced[1] : raw.trim();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        throw new Error(`模型输出不是有效 JSON。输出前 200 字：${raw.slice(0, 200)}`);
+      }
+      if (!Array.isArray(parsed)) {
+        throw new Error(`模型输出不是有效 JSON 数组。输出前 200 字：${raw.slice(0, 200)}`);
+      }
+
+      const VALID_TYPES = ["character", "foreshadowing", "event", "item", "rule", "location"];
+      const items: StateExtractItem[] = [];
+      for (const item of parsed as Array<Record<string, unknown>>) {
+        if (!item || typeof item.name !== "string" || !item.name.trim()) continue;
+        if (typeof item.data !== "string" || !item.data.trim()) continue;
+        if (typeof item.type !== "string" || !VALID_TYPES.includes(item.type)) continue;
+        const entity = {
+          type: item.type as StateEntity["type"],
+          name: item.name.trim(),
+          data: item.data.trim(),
+          status: (item.status === "confirmed" ? "confirmed" : "inferred") as "confirmed" | "inferred",
+          source: chapter.title
+        };
+        const match = existing.find((e) => e.type === entity.type && e.name === entity.name);
+        const relation: StateExtractItem["relation"] = !match
+          ? "new"
+          : match.locked || (match.status === "confirmed" && match.data !== entity.data)
+            ? "conflict"
+            : "update";
+        items.push({ entity, relation, ...(match ? { existingData: match.data } : {}) });
+      }
+      return { chapterTitle: chapter.title, items };
+    }
   );
 
   // ---- 记忆提案 ----
@@ -480,10 +625,29 @@ export function registerIpc(): void {
       runId: string,
       workflowId: string,
       input: string,
-      projectId?: string
-    ): Promise<{ finalOutput?: string; error?: string; proposalsCreated?: number; proposalsError?: string }> => {
+      projectId?: string,
+      resumeFromRunId?: string
+    ): Promise<{ finalOutput?: string; error?: string; proposalsCreated?: number }> => {
       const workflow = readWorkflows().find((w) => w.id === workflowId);
       if (!workflow) throw new Error("工作流不存在");
+      // 断点续跑：从上次运行的记录中取出已成功节点的输出构建重放表；找不到记录或没有可重放节点则按普通运行
+      let replayOutputs: Record<string, string> | undefined;
+      let effectiveInput = input;
+      if (resumeFromRunId && projectId) {
+        const prev = novelFs.runHistory(projectId).find((r) => r.runId === resumeFromRunId);
+        if (prev?.nodeRuns) {
+          const table: Record<string, string> = {};
+          for (const nr of prev.nodeRuns) {
+            if (nr.status === "succeeded" && typeof nr.output === "string") {
+              table[`${nr.nodeId}#${nr.attempt}`] = nr.output;
+            }
+          }
+          if (Object.keys(table).length > 0) {
+            replayOutputs = table;
+            if (typeof prev.input === "string") effectiveInput = prev.input;
+          }
+        }
+      }
       return workflowEngine.run(
         e.sender,
         runId,
@@ -491,8 +655,9 @@ export function registerIpc(): void {
         readAgents(),
         readModels(),
         getKey,
-        input,
-        projectId
+        effectiveInput,
+        projectId,
+        replayOutputs
       );
     }
   );

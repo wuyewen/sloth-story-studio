@@ -8,6 +8,8 @@ import type {
   ModelProviderInput,
   ProposalInput,
   SlothApi,
+  StateEntityInput,
+  StyleProfileInput,
   WorkflowEdge,
   WorkflowInput,
   WorkflowNode,
@@ -80,8 +82,8 @@ const api: SlothApi = {
       ipcRenderer.invoke("novels:deleteChapter", projectId, chapterId),
     readChapter: (projectId: string, chapterId: string) =>
       ipcRenderer.invoke("novels:readChapter", projectId, chapterId),
-    writeChapter: (projectId: string, chapterId: string, content: string) =>
-      ipcRenderer.invoke("novels:writeChapter", projectId, chapterId, content),
+    writeChapter: (projectId: string, chapterId: string, content: string, source?: string) =>
+      ipcRenderer.invoke("novels:writeChapter", projectId, chapterId, content, source),
     createUnit: (projectId: string, title: string) =>
       ipcRenderer.invoke("novels:createUnit", projectId, title),
     renameUnit: (projectId: string, unitId: string, title: string) =>
@@ -109,7 +111,22 @@ const api: SlothApi = {
       ipcRenderer.invoke("novels:memoryRestore", projectId, rel, ts),
     runHistory: (projectId: string) => ipcRenderer.invoke("novels:runHistory", projectId),
     revealArtifact: (projectId: string, rel: string) =>
-      ipcRenderer.invoke("novels:revealArtifact", projectId, rel)
+      ipcRenderer.invoke("novels:revealArtifact", projectId, rel),
+    chapterVersions: (projectId: string, chapterId: string) =>
+      ipcRenderer.invoke("novels:chapterVersions", projectId, chapterId),
+    chapterVersionRead: (projectId: string, chapterId: string, ts: number) =>
+      ipcRenderer.invoke("novels:chapterVersionRead", projectId, chapterId, ts),
+    chapterRollback: (projectId: string, chapterId: string, ts: number) =>
+      ipcRenderer.invoke("novels:chapterRollback", projectId, chapterId, ts),
+    stateList: (projectId: string) => ipcRenderer.invoke("novels:stateList", projectId),
+    stateUpsert: (projectId: string, input: StateEntityInput) =>
+      ipcRenderer.invoke("novels:stateUpsert", projectId, input),
+    stateRemove: (projectId: string, id: string) =>
+      ipcRenderer.invoke("novels:stateRemove", projectId, id),
+    stateSetLock: (projectId: string, id: string, locked: boolean) =>
+      ipcRenderer.invoke("novels:stateSetLock", projectId, id, locked),
+    extractChapterState: (projectId: string, chapterRef: { unitId?: string; chapterId: string }) =>
+      ipcRenderer.invoke("novels:extractChapterState", projectId, chapterRef)
   },
   llm: {
     chat: (req: ChatRequest) => ipcRenderer.invoke("llm:chat", req),
@@ -132,8 +149,8 @@ const api: SlothApi = {
       ipcRenderer.invoke("workflows:generate", description, providerId),
     optimize: (current: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, instruction: string, providerId: string) =>
       ipcRenderer.invoke("workflows:optimize", current, instruction, providerId),
-    run: (runId: string, workflowId: string, input: string, projectId?: string) =>
-      ipcRenderer.invoke("workflows:run", runId, workflowId, input, projectId),
+    run: (runId: string, workflowId: string, input: string, projectId?: string, resumeFromRunId?: string) =>
+      ipcRenderer.invoke("workflows:run", runId, workflowId, input, projectId, resumeFromRunId),
     stop: (runId: string) => ipcRenderer.invoke("workflows:stop", runId),
     onEvent: (cb) => subscribe<[WorkflowRunEvent]>("workflow:event", cb),
     listGroups: () => ipcRenderer.invoke("workflows:groupsList"),
@@ -151,6 +168,16 @@ const api: SlothApi = {
       ipcRenderer.invoke("proposals:accept", projectId, id, force),
     reject: (projectId: string, id: string) => ipcRenderer.invoke("proposals:reject", projectId, id),
     currentOf: (projectId: string, id: string) => ipcRenderer.invoke("proposals:currentOf", projectId, id)
+  },
+  styles: {
+    list: () => ipcRenderer.invoke("styles:list"),
+    create: (input: StyleProfileInput) => ipcRenderer.invoke("styles:create", input),
+    update: (id: string, input: StyleProfileInput) => ipcRenderer.invoke("styles:update", id, input),
+    duplicate: (id: string) => ipcRenderer.invoke("styles:duplicate", id),
+    remove: (id: string) => ipcRenderer.invoke("styles:delete", id),
+    listHistory: (id: string) => ipcRenderer.invoke("styles:listHistory", id),
+    restoreVersion: (id: string, version: number) =>
+      ipcRenderer.invoke("styles:restoreVersion", id, version)
   },
   app: {
     openConfig: (kind: "models" | "settings") => ipcRenderer.invoke("app:openConfig", kind),

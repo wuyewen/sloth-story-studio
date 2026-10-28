@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { shell } from "electron";
-import type { ChapterMeta, MemoryFileInfo, MemoryVersion, NovelProject, UnitMeta, WorkflowRunRecord, WorkflowSlot } from "../../shared/types.js";
+import type { ChapterMeta, ChapterVersion, MemoryFileInfo, MemoryVersion, NovelProject, UnitMeta, WorkflowRunRecord, WorkflowSlot } from "../../shared/types.js";
 import { newId, readSettings } from "./store.js";
 
 function novelDir(): string {
@@ -31,6 +31,7 @@ interface MetaFile {
   units?: UnitMeta[];
   workflowIds?: string[];
   workflowSlots?: Partial<Record<WorkflowSlot, string>>;
+  styleId?: string; // 绑定的风格模板（FR-06）
 }
 
 // ---- 项目级共享记忆 ----
@@ -390,12 +391,22 @@ export function rename(id: string, title: string): NovelProject[] {
   return list();
 }
 
-export function updateMeta(id: string, patch: { title?: string; synopsis?: string }): NovelProject[] {
+export function updateMeta(id: string, patch: { title?: string; synopsis?: string; styleId?: string | null }): NovelProject[] {
   const meta = readMeta(id);
   if (patch.title !== undefined) meta.title = patch.title.trim() || meta.title;
   if (patch.synopsis !== undefined) meta.synopsis = patch.synopsis;
+  if (patch.styleId !== undefined) meta.styleId = patch.styleId || undefined;
   writeMeta(meta);
   return list();
+}
+
+// 引擎用：读项目绑定的风格模板 id（项目不存在或读取失败时返回 null）
+export function projectStyleId(projectId: string): string | null {
+  try {
+    return readMeta(projectId).styleId ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // ---- 项目 ↔ 工作流关联 ----
@@ -501,16 +512,107 @@ export function readChapter(projectId: string, chapterId: string): string {
   return fs.readFileSync(filePath, "utf-8");
 }
 
-export function writeChapter(projectId: string, chapterId: string, content: string): void {
+export function writeChapter(projectId: string, chapterId: string, content: string, source?: string): void {
   const meta = readMeta(projectId);
   const chapter = findChapter(meta, chapterId);
   const filePath = path.join(projectDirOf(projectId), "chapters", chapter.file);
+  // 覆盖前快照旧版本（FR-08）：旧文件存在且内容有变化才留档
+  try {
+    if (fs.existsSync(filePath)) {
+      const prev = fs.readFileSync(filePath, "utf-8");
+      if (prev !== content) snapshotChapter(projectId, chapter.file, prev, source ?? "unknown");
+    }
+  } catch (err) {
+    console.warn(`[novelFs] 章节快照失败（不影响保存）: ${err instanceof Error ? err.message : String(err)}`);
+  }
   const tmp = `${filePath}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, content, "utf-8");
   fs.renameSync(tmp, filePath);
   chapter.words = countWords(content);
   chapter.updatedAt = Date.now();
   writeMeta(meta);
+}
+
+// ---- 章节版本历史（FR-08）----
+
+const CHAPTER_HISTORY_KEEP = 30;
+
+function chapterHistoryDir(projectId: string): string {
+  const dir = path.join(projectDirOf(projectId), ".history", "chapters");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function chapterHistoryIndexPath(projectId: string): string {
+  return path.join(chapterHistoryDir(projectId), "index.json");
+}
+
+// 损坏的 index.json 重置为空，不崩
+function readChapterHistoryIndex(projectId: string): Record<string, ChapterVersion[]> {
+  try {
+    const raw = fs.readFileSync(chapterHistoryIndexPath(projectId), "utf-8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("结构不符");
+    return parsed as Record<string, ChapterVersion[]>;
+  } catch (err) {
+    if (fs.existsSync(chapterHistoryIndexPath(projectId))) {
+      console.warn(`[novelFs] 章节历史 index.json 损坏，重置为空: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return {};
+  }
+}
+
+function writeChapterHistoryIndex(projectId: string, index: Record<string, ChapterVersion[]>): void {
+  const file = chapterHistoryIndexPath(projectId);
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(index), "utf-8");
+  fs.renameSync(tmp, file);
+}
+
+// 章节文件名已 sanitize（chapterFileName 产出），快照文件名直接在其后加时间戳
+function snapshotChapter(projectId: string, chapterFile: string, content: string, source: string): void {
+  const dir = chapterHistoryDir(projectId);
+  const ts = Date.now();
+  const snapFile = path.join(dir, `${chapterFile}.${ts}.md`);
+  const tmp = `${snapFile}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, content, "utf-8");
+  fs.renameSync(tmp, snapFile);
+
+  const index = readChapterHistoryIndex(projectId);
+  const list = index[chapterFile] ?? [];
+  list.push({ ts, size: Buffer.byteLength(content, "utf-8"), source });
+  list.sort((a, b) => a.ts - b.ts);
+  // 每章最多保留 30 个快照，超出删最旧（连同 index 同步）
+  while (list.length > CHAPTER_HISTORY_KEEP) {
+    const oldest = list.shift();
+    if (oldest) fs.rmSync(path.join(dir, `${chapterFile}.${oldest.ts}.md`), { force: true });
+  }
+  index[chapterFile] = list;
+  writeChapterHistoryIndex(projectId, index);
+}
+
+function chapterFileOf(projectId: string, chapterId: string): string {
+  const meta = readMeta(projectId);
+  return findChapter(meta, chapterId).file;
+}
+
+export function chapterVersions(projectId: string, chapterId: string): ChapterVersion[] {
+  const file = chapterFileOf(projectId, chapterId);
+  const list = readChapterHistoryIndex(projectId)[file] ?? [];
+  return [...list].sort((a, b) => b.ts - a.ts); // 新→旧
+}
+
+export function chapterVersionRead(projectId: string, chapterId: string, ts: number): string {
+  const file = chapterFileOf(projectId, chapterId);
+  const snap = path.join(chapterHistoryDir(projectId), `${file}.${ts}.md`);
+  if (!fs.existsSync(snap)) throw new Error("版本不存在");
+  return fs.readFileSync(snap, "utf-8");
+}
+
+// 回滚：writeChapter 会先把当前正文照常快照一次（source: "rollback"），再写回指定快照内容
+export function chapterRollback(projectId: string, chapterId: string, ts: number): void {
+  const content = chapterVersionRead(projectId, chapterId, ts);
+  writeChapter(projectId, chapterId, content, "rollback");
 }
 
 // ---- 单元（故事单元 / 卷）----

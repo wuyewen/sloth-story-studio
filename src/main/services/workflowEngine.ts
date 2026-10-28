@@ -4,14 +4,19 @@ import type {
   AgentRunEvent,
   ChatMessage,
   ModelProvider,
+  NodeRunRecord,
+  RunUsage,
   WorkflowDef,
   WorkflowEdge,
   WorkflowNode,
   WorkflowRunEvent
 } from "../../shared/types.js";
+import { CONTEXT_DEFAULT_SOURCES, CONTEXT_SOURCES, REVIEW_DIMENSIONS } from "../../shared/types.js";
 import { chat } from "./llmClient.js";
+import type { ChatUsage } from "./llmClient.js";
 import * as novelFs from "./novelFs.js";
 import * as proposals from "./proposals.js";
+import * as styleStore from "./styleStore.js";
 
 export type GetKey = (providerId: string) => string;
 
@@ -50,7 +55,8 @@ function interpolate(
   input: string,
   outputs: Map<string, string>,
   labelToId?: Map<string, string>,
-  memory?: Map<string, string>
+  memory?: Map<string, string>,
+  style?: Map<string, string>
 ): string {
   return template
     .replace(/\{\{\s*input\s*\}\}/g, input)
@@ -58,13 +64,15 @@ function interpolate(
       const k = key.trim();
       return outputs.get(k) ?? outputs.get(labelToId?.get(k) ?? "") ?? "";
     })
-    .replace(/\{\{\s*memory\.(.+?)\s*\}\}/g, (_m, key: string) => memory?.get(key.trim()) ?? "");
+    .replace(/\{\{\s*memory\.(.+?)\s*\}\}/g, (_m, key: string) => memory?.get(key.trim()) ?? "")
+    .replace(/\{\{\s*style\.(.+?)\s*\}\}/g, (_m, key: string) => style?.get(key.trim()) ?? "");
 }
 
 // 扫描模板中的 {{memory.xxx}} 引用（xxx 为 memory/ 下的相对路径，可不带 .md）
 const MEMORY_REF_RE = /\{\{\s*memory\.(.+?)\s*\}\}/g;
 
 // 解析 autoProposal 节点的输出为结构化提案并创建到待审核（不自动应用）
+// 契约校验：输出必须是合法 JSON 数组（宽容剥 ```json 围栏），元素必须含 targetFile 与 content/proposedContent，违反则抛出带诊断信息的错误
 interface RawProposal {
   targetFile?: string;
   summary?: string;
@@ -73,10 +81,14 @@ interface RawProposal {
   proposedContent?: string;
 }
 
-function createProposalsFromOutput(projectId: string, output: string): { created: number; error?: string } {
+function createProposalsFromOutput(projectId: string, output: string, nodeLabel: string): { created: number } {
   const trimmed = output.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  let text = fenced ? fenced[1] : trimmed;
+  const text = fenced ? fenced[1] : trimmed;
+  const notJsonArray = () =>
+    new Error(
+      `节点「${nodeLabel}」开启了自动转提案，但输出不是有效的 JSON 数组。输出前 200 字：${output.slice(0, 200)}`
+    );
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -88,10 +100,10 @@ function createProposalsFromOutput(projectId: string, output: string): { created
       try {
         parsed = JSON.parse(text.slice(start, end + 1));
       } catch {
-        return { created: 0, error: "提案节点输出不是可解析的 JSON 数组" };
+        throw notJsonArray();
       }
     } else {
-      return { created: 0, error: "提案节点输出不是可解析的 JSON 数组" };
+      throw notJsonArray();
     }
   }
   const items: RawProposal[] = Array.isArray(parsed)
@@ -99,13 +111,25 @@ function createProposalsFromOutput(projectId: string, output: string): { created
     : Array.isArray((parsed as { proposals?: RawProposal[] }).proposals)
       ? (parsed as { proposals: RawProposal[] }).proposals
       : [];
-  if (items.length === 0) return { created: 0, error: "提案 JSON 为空或结构不符" };
+  if (items.length === 0) {
+    throw new Error(`节点「${nodeLabel}」开启了自动转提案，但输出的 JSON 数组为空或结构不符（需要提案对象数组）。`);
+  }
+  // 逐条校验必填字段，一次性列出所有问题
+  const problems: string[] = [];
+  items.forEach((item, i) => {
+    const missing: string[] = [];
+    if (!item || typeof item.targetFile !== "string" || !item.targetFile.trim()) missing.push("targetFile");
+    const content = item?.proposedContent ?? item?.content;
+    if (typeof content !== "string" || !content.trim()) missing.push("content");
+    if (missing.length > 0) problems.push(`第 ${i + 1} 个元素缺少 ${missing.join("、")} 字段`);
+  });
+  if (problems.length > 0) {
+    throw new Error(`节点「${nodeLabel}」的提案 JSON 校验未通过：${problems.join("；")}。`);
+  }
   let created = 0;
   for (const item of items) {
-    if (!item || typeof item.targetFile !== "string") continue;
-    const content = item.proposedContent ?? item.content;
-    if (typeof content !== "string" || !content.trim()) continue;
-    const targetFile = item.targetFile.endsWith(".md") ? item.targetFile : `${item.targetFile}.md`;
+    const content = (item.proposedContent ?? item.content) as string;
+    const targetFile = item.targetFile!.endsWith(".md") ? item.targetFile! : `${item.targetFile}.md`;
     try {
       proposals.create(projectId, {
         targetFile,
@@ -115,10 +139,107 @@ function createProposalsFromOutput(projectId: string, output: string): { created
       });
       created++;
     } catch {
-      // 单条失败不阻塞其余提案
+      // 单条写入失败不阻塞其余提案
     }
   }
-  return created > 0 ? { created } : { created: 0, error: "提案条目缺少 targetFile 或 content" };
+  return { created };
+}
+
+// ---- 结构化审核节点（kind: review）----
+
+function reviewSystemPrompt(dimensions: string[]): string {
+  return `你是一位严谨的审稿总编。只针对以下审核维度审查用户给出的文本：${dimensions.join("、")}。
+输出纯 JSON（不要 markdown 代码围栏、不要任何解释）：
+{"verdict":"pass"|"revise","issues":[{"category":"维度名","severity":"blocker"|"major"|"minor","evidence":"原文证据片段","explanation":"问题原因","suggestedFix":"具体修复建议","quote":"需要修改的原文句子或段落（逐字摘自原文，供局部修订定位）"}]}
+规则：
+- 只有不存在 blocker 级阻断问题时 verdict 才允许为 "pass"，否则必须为 "revise"。
+- 每个 issue 必须含 quote，且 quote 必须逐字摘自原文，不得改写。
+- 没有问题就输出 {"verdict":"pass","issues":[]}。
+- 只输出 JSON。`;
+}
+
+interface ReviewIssue {
+  category: string;
+  severity: "blocker" | "major" | "minor";
+  evidence: string;
+  explanation: string;
+  suggestedFix: string;
+  quote: string;
+}
+
+// 校验并规范化审核节点输出；不合法则抛出带诊断信息的错误
+function validateReviewOutput(label: string, raw: string): string {
+  const text = stripCodeFence(raw).trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`审核节点「${label}」输出不是有效 JSON，前 200 字：${raw.slice(0, 200)}`);
+  }
+  const obj = parsed as { verdict?: unknown; issues?: unknown };
+  if (obj.verdict !== "pass" && obj.verdict !== "revise") {
+    throw new Error(`审核节点「${label}」输出的 verdict 必须是 "pass" 或 "revise"，实际：${String(obj.verdict)}`);
+  }
+  const rawIssues = obj.issues === undefined ? [] : obj.issues;
+  if (!Array.isArray(rawIssues)) {
+    throw new Error(`审核节点「${label}」输出的 issues 必须是数组`);
+  }
+  const problems: string[] = [];
+  const issues: ReviewIssue[] = rawIssues.map((it, i) => {
+    const o = (it ?? {}) as Record<string, unknown>;
+    const missing = ["category", "severity", "evidence", "explanation", "suggestedFix", "quote"].filter(
+      (k) => typeof o[k] !== "string" || !(o[k] as string).trim()
+    );
+    if (missing.length > 0) {
+      problems.push(`第 ${i + 1} 个 issue 缺少 ${missing.join("、")} 字段`);
+    }
+    const severity = typeof o.severity === "string" ? o.severity : "";
+    if (severity && !["blocker", "major", "minor"].includes(severity)) {
+      problems.push(`第 ${i + 1} 个 issue 的 severity 非法（${severity}），应为 blocker|major|minor`);
+    }
+    return {
+      category: String(o.category ?? ""),
+      severity: (["blocker", "major", "minor"].includes(severity) ? severity : "major") as ReviewIssue["severity"],
+      evidence: String(o.evidence ?? ""),
+      explanation: String(o.explanation ?? ""),
+      suggestedFix: String(o.suggestedFix ?? ""),
+      quote: String(o.quote ?? "")
+    };
+  });
+  if (problems.length > 0) {
+    throw new Error(`审核节点「${label}」的 issues 校验未通过：${problems.join("；")}。`);
+  }
+  return JSON.stringify({ verdict: obj.verdict, issues });
+}
+
+// ---- 局部修订节点（kind: patch）----
+
+const PATCH_SYSTEM_PROMPT = `你是文本修订助手。根据审核结果 JSON 中的 issues，为每条需要修改的问题输出替换对。只输出一个 JSON 数组（不要 markdown 代码围栏、不要任何解释）：
+[{"old":"逐字摘自原文的片段","new":"修改后的文本"}]
+规则：
+- old 必须逐字摘自原文（优先使用 issue 的 quote 字段），不得改写、不得包含原文之外的内容。
+- 只修改 issues 指出的问题，不做任何其他改动。
+- verdict 为 pass 或没有需要修改的问题时，输出空数组 []。`;
+
+interface PatchPair {
+  old: string;
+  new: string;
+}
+
+function parsePatchPairs(label: string, raw: string): PatchPair[] {
+  const text = stripCodeFence(raw).trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`局部修订节点「${label}」输出不是有效 JSON 数组，前 200 字：${raw.slice(0, 200)}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`局部修订节点「${label}」输出不是有效 JSON 数组，前 200 字：${raw.slice(0, 200)}`);
+  }
+  return (parsed as Array<Record<string, unknown>>)
+    .filter((p) => p && typeof p.old === "string" && typeof p.new === "string" && p.old.length > 0)
+    .map((p) => ({ old: p.old as string, new: p.new as string }));
 }
 
 function pickProvider(providers: ModelProvider[], preferredId?: string | null): ModelProvider {
@@ -139,22 +260,72 @@ export async function run(
   providers: ModelProvider[],
   getKey: GetKey,
   input: string,
-  projectId?: string
+  projectId?: string,
+  replayOutputs?: Record<string, string> // 断点续跑：key 为 `${nodeId}#${attempt}`，命中则复用输出、跳过 LLM 调用
 ): Promise<{ finalOutput?: string; error?: string; proposalsCreated?: number }> {
   const state = { stopped: false, controller: null as AbortController | null };
   running.set(runId, state);
 
-  // 每次 LLM 调用都可被 stopRun 中断
+  // 每次 LLM 调用都可被 stopRun 中断；同时累加 run 级 token 用量；支持单次调用超时（FR-09）
+  const runUsage: RunUsage = { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, unknown: false };
+  const budget = workflow.budget;
+  const callTimeoutSec =
+    budget?.callTimeoutSec && budget.callTimeoutSec > 0 ? budget.callTimeoutSec : 0;
   const callChat = (
     provider: ModelProvider,
     messages: ChatMessage[],
-    opts: { temperature?: number } = {}
+    opts: { temperature?: number; onUsage?: (usage: ChatUsage) => void } = {}
   ): Promise<string> => {
     const controller = new AbortController();
     state.controller = controller;
-    return chat(provider, getKey(provider.id), messages, { ...opts, signal: controller.signal }).finally(() => {
-      if (state.controller === controller) state.controller = null;
-    });
+    let timedOut = false;
+    const timer =
+      callTimeoutSec > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, callTimeoutSec * 1000)
+        : null;
+    let gotUsage = false;
+    return chat(provider, getKey(provider.id), messages, {
+      ...opts,
+      signal: controller.signal,
+      onUsage: (u) => {
+        gotUsage = true;
+        runUsage.promptTokens += u.promptTokens ?? 0;
+        runUsage.completionTokens += u.completionTokens ?? 0;
+        runUsage.totalTokens += u.totalTokens ?? 0;
+        opts.onUsage?.(u);
+      }
+    })
+      .then((content) => {
+        runUsage.calls += 1;
+        if (!gotUsage) runUsage.unknown = true;
+        return content;
+      })
+      .catch((err) => {
+        if (timedOut) throw new Error(`调用超时（${callTimeoutSec} 秒），模型未及时响应`);
+        throw err;
+      })
+      .finally(() => {
+        if (timer) clearTimeout(timer);
+        if (state.controller === controller) state.controller = null;
+      });
+  };
+
+  // 预算检查（FR-09）：每个 LLM 节点发起调用前调用；超限即抛错，走 node-error/run-error 通道
+  const checkBudget = (): void => {
+    if (!budget) return;
+    if (budget.maxCalls && budget.maxCalls > 0 && runUsage.calls >= budget.maxCalls) {
+      throw new Error(
+        `已达本次运行预算上限（模型调用 ${budget.maxCalls} 次），流程已安全停止。已完成节点的结果已保存，可从运行记录「从断点继续」恢复。`
+      );
+    }
+    if (budget.maxTokens && budget.maxTokens > 0 && !runUsage.unknown && runUsage.totalTokens >= budget.maxTokens) {
+      throw new Error(
+        `已达本次运行预算上限（token ${budget.maxTokens}），流程已安全停止。已完成节点的结果已保存，可从运行记录「从断点继续」恢复。`
+      );
+    }
   };
 
   const nodeById = new Map<string, WorkflowNode>(workflow.nodes.map((n) => [n.id, n]));
@@ -214,9 +385,9 @@ export async function run(
   let steps = 0;
   let endOutput: string | undefined;
   let proposalsCreated = 0;
-  let proposalsError: string | undefined;
   const startedAt = Date.now();
   const memoryRefs: string[] = [];
+  const nodeRuns: NodeRunRecord[] = []; // 节点级执行记录（仅 agent/prompt 节点）
 
   // 记忆快照：运行前扫描所有节点模板里的 {{memory.xxx}}，一次性从项目目录读入
   const memory = new Map<string, string>();
@@ -239,6 +410,11 @@ export async function run(
     }
   }
 
+  // 风格模板上下文（FR-06）：项目绑定风格时构建 {{style.*}} 插值表，并注入审核节点
+  const styleProfile = projectId ? styleStore.get(novelFs.projectStyleId(projectId) ?? "") : null;
+  const styleCtx = styleStore.styleContextMap(styleProfile);
+  const styleFull = styleCtx.get("full") ?? "";
+
   // 项目内运行时落盘运行记录（不含任何密钥信息）
   const writeRecord = (status: "done" | "error" | "stopped", error?: string): void => {
     if (!projectId) return;
@@ -255,9 +431,12 @@ export async function run(
       ...(error ? { error } : {}),
       steps,
       memoryRefs,
+      input,
       outputPreview: final.slice(0, 200),
       finalOutput: final,
-      ...(artifactRel ? { artifactPath: artifactRel } : {})
+      ...(artifactRel ? { artifactPath: artifactRel } : {}),
+      nodeRuns,
+      ...(runUsage.calls > 0 ? { usage: runUsage } : {})
     });
   };
 
@@ -270,13 +449,18 @@ export async function run(
     }
 
     const kind = node.data.kind;
-    if (kind === "agent" || kind === "prompt") {
+    // LLM 类节点：计执行次数、走节点级记录与断点重放；context 节点不调 LLM 但同样计数与记录
+    const isLlmNode = kind === "agent" || kind === "prompt" || kind === "review" || kind === "patch";
+    const isRecorded = isLlmNode || kind === "context";
+    let attempt = 0;
+    if (isRecorded) {
       const maxVisits =
         typeof node.data.maxVisits === "number" && node.data.maxVisits > 0 ? node.data.maxVisits : 3;
       const seen = (visits.get(node.id) ?? 0) + 1;
       visits.set(node.id, seen);
       visitsCtx[node.id] = seen;
       if (node.data.label) visitsCtx[node.data.label] = seen;
+      attempt = seen;
       if (seen > maxVisits) {
         throw new Error(
           `节点「${node.data.label}」已执行 ${maxVisits} 次（达到重试上限），流程终止。可在节点上调整「最多执行次数」。`
@@ -285,6 +469,16 @@ export async function run(
     }
     emit({ type: "node-start", nodeId: node.id, label: node.data.label });
     inFlight.add(node.id);
+
+    // 节点级可观测性：记录 LLM 类节点与 context 组装节点
+    const recordable = isRecorded;
+    const recStartedAt = Date.now();
+    let recInput = "";
+    let recModel: string | undefined;
+    let recUsage: ChatUsage | undefined;
+    let recReplayed = false;
+    let recNote: string | undefined; // 成功但有需要说明的情况（如局部修订部分替换未定位）
+    let recContextRefs: { source: string; chars: number }[] | undefined; // context 节点：实际包含的来源
 
     let output = "";
     try {
@@ -295,35 +489,308 @@ export async function run(
       } else if (kind === "start") {
         output = input;
       } else if (kind === "agent") {
-        const agent = agents.find((a) => a.id === node.data.agentId);
-        if (!agent) throw new Error(`节点「${node.data.label}」未绑定有效的 Agent`);
-        // 模型优先级：工作流指定 > Agent 绑定 > 第一个启用的模型
-        const wfProvider = workflow.providerId
-          ? providers.find((p) => p.id === workflow.providerId) ?? null
-          : null;
-        const provider = wfProvider ?? pickProvider(providers, agent.providerId);
         const custom = node.data.contextTemplate?.trim();
         const userContent = custom
-          ? interpolate(custom, input, outputs, labelToId, memory)
+          ? interpolate(custom, input, outputs, labelToId, memory, styleCtx)
           : upstreamOutput || input;
-        const messages: ChatMessage[] = [
-          { role: "system", content: agent.systemPrompt },
-          { role: "user", content: userContent }
-        ];
-        output = await callChat(provider, messages, { temperature: agent.temperature });
+        recInput = userContent;
+        // 断点续跑：该节点该次数上次已成功，直接复用输出、跳过 LLM 调用
+        const replay = replayOutputs?.[`${node.id}#${attempt}`];
+        if (replay !== undefined) {
+          output = replay;
+          recReplayed = true;
+        } else {
+          const agent = agents.find((a) => a.id === node.data.agentId);
+          if (!agent) throw new Error(`节点「${node.data.label}」未绑定有效的 Agent`);
+          // 模型优先级：工作流指定 > Agent 绑定 > 第一个启用的模型
+          const wfProvider = workflow.providerId
+            ? providers.find((p) => p.id === workflow.providerId) ?? null
+            : null;
+          const provider = wfProvider ?? pickProvider(providers, agent.providerId);
+          recModel = provider.displayName || provider.model;
+          const messages: ChatMessage[] = [
+            { role: "system", content: agent.systemPrompt },
+            { role: "user", content: userContent }
+          ];
+          checkBudget();
+          output = await callChat(provider, messages, {
+            temperature: agent.temperature,
+            onUsage: (u) => {
+              recUsage = u;
+            }
+          });
+        }
       } else if (kind === "prompt") {
-        const provider = (workflow.providerId ? providers.find((p) => p.id === workflow.providerId) : null) ?? pickProvider(providers, null);
-        const text = interpolate(node.data.template ?? "", input, outputs, labelToId, memory);
-        output = await callChat(provider, [{ role: "user", content: text }]);
+        const text = interpolate(node.data.template ?? "", input, outputs, labelToId, memory, styleCtx);
+        recInput = text;
+        // 断点续跑：该节点该次数上次已成功，直接复用输出、跳过 LLM 调用
+        const replay = replayOutputs?.[`${node.id}#${attempt}`];
+        if (replay !== undefined) {
+          output = replay;
+          recReplayed = true;
+        } else {
+          const provider = (workflow.providerId ? providers.find((p) => p.id === workflow.providerId) : null) ?? pickProvider(providers, null);
+          recModel = provider.displayName || provider.model;
+          checkBudget();
+          output = await callChat(provider, [{ role: "user", content: text }], {
+            onUsage: (u) => {
+              recUsage = u;
+            }
+          });
+        }
+      } else if (kind === "review") {
+        // 结构化审核：不绑 Agent，provider 取 工作流指定 > 第一个启用的
+        const dims =
+          Array.isArray(node.data.dimensions) && node.data.dimensions.length > 0
+            ? node.data.dimensions.filter((d): d is string => typeof d === "string" && d.trim().length > 0)
+            : [...REVIEW_DIMENSIONS];
+        const dimensions = dims.length > 0 ? dims : [...REVIEW_DIMENSIONS];
+        const custom = node.data.contextTemplate?.trim();
+        const reviewInput = custom
+          ? interpolate(custom, input, outputs, labelToId, memory, styleCtx)
+          : upstreamOutput || input;
+        recInput = reviewInput;
+        const replay = replayOutputs?.[`${node.id}#${attempt}`];
+        if (replay !== undefined) {
+          output = replay;
+          recReplayed = true;
+        } else {
+          const provider =
+            (workflow.providerId ? providers.find((p) => p.id === workflow.providerId) : null) ??
+            pickProvider(providers, null);
+          recModel = provider.displayName || provider.model;
+          // 项目绑定风格模板时，无论是否勾选文风维度，都以该配置为准审核文风一致性
+          const sysBase = reviewSystemPrompt(dimensions);
+          const sysPrompt = styleFull
+            ? `${sysBase}\n\n【作品风格配置】\n${styleFull}\n\n文风一致性审核以上述风格配置为准。`
+            : sysBase;
+          checkBudget();
+          const raw = await callChat(
+            provider,
+            [
+              { role: "system", content: sysPrompt },
+              { role: "user", content: reviewInput }
+            ],
+            {
+              temperature: 0.2,
+              onUsage: (u) => {
+                recUsage = u;
+              }
+            }
+          );
+          output = validateReviewOutput(node.data.label, raw);
+        }
+      } else if (kind === "patch") {
+        // 局部修订：按来源 label 找文本与审核结果，缺省回退直接上游
+        const resolveSource = (label: string | undefined): string => {
+          const key = label?.trim();
+          if (key) {
+            const hit = outputs.get(key) ?? outputs.get(labelToId.get(key) ?? "");
+            if (typeof hit === "string" && hit) return hit;
+          }
+          return upstreamOutput || input;
+        };
+        const text = resolveSource(node.data.textSource);
+        if (!text.trim()) throw new Error(`局部修订节点「${node.data.label}」找不到被修订文本（检查 textSource 或上游输出）`);
+        const reviewJson = resolveSource(node.data.reviewSource);
+        if (!reviewJson.trim()) throw new Error(`局部修订节点「${node.data.label}」找不到审核结果（检查 reviewSource 或上游输出）`);
+        const patchInput = `审核结果：\n${reviewJson}\n\n原文：\n${text}`;
+        recInput = patchInput;
+        const replay = replayOutputs?.[`${node.id}#${attempt}`];
+        // 短路：审核 JSON 可解析且无需修订（issues 为空数组，或 verdict=pass 且无 issues 字段）时跳过 LLM，直接透传原文
+        let noFixNeeded = false;
+        try {
+          const parsedReview = JSON.parse(stripCodeFence(reviewJson).trim()) as {
+            verdict?: unknown;
+            issues?: unknown;
+          };
+          if (Array.isArray(parsedReview?.issues)) {
+            noFixNeeded = parsedReview.issues.length === 0;
+          } else {
+            noFixNeeded = parsedReview?.verdict === "pass";
+          }
+        } catch {
+          // 审核结果不是可解析的 JSON：保持现有行为，照常走 LLM
+        }
+        if (replay !== undefined) {
+          output = replay;
+          recReplayed = true;
+        } else if (noFixNeeded) {
+          output = text; // 审核通过：零成本透传正文，保证主链路最终输出永远是正文
+        } else {
+          const provider =
+            (workflow.providerId ? providers.find((p) => p.id === workflow.providerId) : null) ??
+            pickProvider(providers, null);
+          recModel = provider.displayName || provider.model;
+          checkBudget();
+          const raw = await callChat(
+            provider,
+            [
+              { role: "system", content: PATCH_SYSTEM_PROMPT },
+              { role: "user", content: patchInput }
+            ],
+            {
+              temperature: 0.2,
+              onUsage: (u) => {
+                recUsage = u;
+              }
+            }
+          );
+          const pairs = parsePatchPairs(node.data.label, raw);
+          let patched = text;
+          let unmatched = 0;
+          for (const p of pairs) {
+            const idx = patched.indexOf(p.old); // 多处出现时替换第一处
+            if (idx < 0) {
+              unmatched++;
+            } else {
+              patched = patched.slice(0, idx) + p.new + patched.slice(idx + p.old.length);
+            }
+          }
+          if (pairs.length > 0 && unmatched / pairs.length > 0.5) {
+            throw new Error(
+              `局部修订定位失败：${pairs.length} 处替换中 ${unmatched} 处未在原文找到，请改为整章重写`
+            );
+          }
+          if (unmatched > 0) recNote = `有 ${unmatched} 处替换未定位，已跳过`;
+          output = pairs.length === 0 ? text : patched;
+        }
+      } else if (kind === "context") {
+        // 上下文构建器（FR-05）：纯组装节点，不调 LLM
+        const replay = replayOutputs?.[`${node.id}#${attempt}`];
+        if (replay !== undefined) {
+          output = replay;
+          recReplayed = true;
+        } else {
+          const sources =
+            Array.isArray(node.data.contextSources) && node.data.contextSources.length > 0
+              ? node.data.contextSources.filter((s): s is string => typeof s === "string")
+              : [...CONTEXT_DEFAULT_SOURCES];
+          const maxChars =
+            typeof node.data.contextMaxChars === "number" && node.data.contextMaxChars > 0
+              ? node.data.contextMaxChars
+              : 12000;
+          const recentN =
+            typeof node.data.contextRecentChapters === "number" && node.data.contextRecentChapters > 0
+              ? Math.floor(node.data.contextRecentChapters)
+              : 1;
+          const chapterChars =
+            typeof node.data.contextChapterChars === "number" && node.data.contextChapterChars > 0
+              ? node.data.contextChapterChars
+              : 3000;
+          const sourceLabel = (id: string): string => CONTEXT_SOURCES.find((c) => c.id === id)?.label ?? id;
+
+          const blocks: { id: string; label: string; text: string }[] = [];
+          for (const src of sources) {
+            let text = "";
+            if (src === "style") {
+              text = styleFull;
+            } else if (src.startsWith("state-")) {
+              // 六类结构化状态：读对应物化 md（该文件可能没被任何模板引用，这里直接读）
+              if (projectId) {
+                const rel = `${src}.md`;
+                try {
+                  const t = novelFs.memoryRead(projectId, rel);
+                  if (t.trim()) {
+                    text = t;
+                    if (!memoryRefs.includes(rel)) memoryRefs.push(rel);
+                  }
+                } catch {
+                  // 读不到跳过
+                }
+              }
+            } else if (src === "memory-files") {
+              if (projectId && typeof node.data.contextMemoryFiles === "string") {
+                const names = node.data.contextMemoryFiles
+                  .split(/[,，]/)
+                  .map((s) => s.trim())
+                  .filter(Boolean);
+                const parts: string[] = [];
+                for (const name of names) {
+                  const rel = name.endsWith(".md") ? name : `${name}.md`;
+                  try {
+                    const t = novelFs.memoryRead(projectId, rel);
+                    if (t.trim()) {
+                      parts.push(`#### ${name}\n${t}`);
+                      if (!memoryRefs.includes(rel)) memoryRefs.push(rel);
+                    }
+                  } catch {
+                    // 读不到跳过
+                  }
+                }
+                text = parts.join("\n\n");
+              }
+            } else if (src === "recent-chapters") {
+              if (projectId) {
+                try {
+                  const proj = novelFs.list().find((p) => p.id === projectId);
+                  if (proj) {
+                    const parts: string[] = [];
+                    for (const c of proj.chapters.slice(-recentN)) {
+                      let body = novelFs.readChapter(projectId, c.id);
+                      if (!body.trim()) continue;
+                      if (body.length > chapterChars) body = `${body.slice(0, chapterChars)}\n（后略）`;
+                      parts.push(`### ${c.title}\n${body}`);
+                    }
+                    text = parts.join("\n\n");
+                  }
+                } catch {
+                  // 项目读取失败跳过
+                }
+              }
+            } else if (src === "input") {
+              text = input;
+            }
+            if (text.trim()) blocks.push({ id: src, label: sourceLabel(src), text });
+          }
+
+          // 预算控制：总长超 maxChars 时从最低优先级（列表最后）的非 input 来源开始整体移除；input 永不移除
+          const render = (b: { label: string; text: string }): string => `【${b.label}】\n${b.text}`;
+          const kept = [...blocks];
+          const removed: string[] = [];
+          const totalLen = (): number =>
+            kept.reduce((sum, b) => sum + render(b).length, 0) + Math.max(0, kept.length - 1) * 2;
+          while (totalLen() > maxChars) {
+            let idx = -1;
+            for (let i = kept.length - 1; i >= 0; i--) {
+              if (kept[i].id !== "input") {
+                idx = i;
+                break;
+              }
+            }
+            if (idx < 0) break; // 只剩 input，超出就让它超
+            removed.unshift(kept[idx].label);
+            kept.splice(idx, 1);
+          }
+
+          recContextRefs = [
+            ...kept.map((b) => ({ source: b.label, chars: b.text.length })),
+            ...removed.map((r) => ({ source: `${r}(已省略)`, chars: 0 }))
+          ];
+          output = kept.map(render).join("\n\n");
+          if (removed.length > 0) {
+            output += `\n\n【上下文预算 ${maxChars} 字符，已省略：${removed.join("、")}】`;
+          }
+        }
       } else if (kind === "end") {
         output = upstreamOutput;
+        // 可选输出来源：条件分支汇入时，end 输出「最后那版正文」而非 pass 路径上游的内容
+        const srcList = node.data.outputSource?.trim();
+        if (srcList) {
+          for (const name of srcList.split(/[,，]/).map((s) => s.trim()).filter(Boolean)) {
+            const hit = outputs.get(name) ?? outputs.get(labelToId.get(name) ?? "");
+            if (typeof hit === "string" && hit) {
+              output = hit;
+              break;
+            }
+          }
+        }
         outputs.set(node.id, output);
         endOutput = output;
-        // 结束节点也可自动转提案（用最终输出解析）
+        // 结束节点也可自动转提案（用最终输出解析）；契约不满足时抛出错误终止运行
         if (node.data.autoProposal && projectId && output.trim()) {
-          const res = createProposalsFromOutput(projectId, output);
+          const res = createProposalsFromOutput(projectId, output, node.data.label);
           proposalsCreated += res.created;
-          if (res.error) proposalsError = res.error;
         }
         inFlight.delete(node.id);
         emit({
@@ -340,8 +807,48 @@ export async function run(
       inFlight.delete(node.id);
       if (state.stopped) return;
       const message = err instanceof Error ? err.message : String(err);
+      if (recordable) {
+        const recFinishedAt = Date.now();
+        nodeRuns.push({
+          nodeId: node.id,
+          label: node.data.label,
+          kind,
+          attempt,
+          status: "failed",
+          startedAt: recStartedAt,
+          finishedAt: recFinishedAt,
+          durationMs: recFinishedAt - recStartedAt,
+          ...(recModel ? { model: recModel } : {}),
+          inputChars: recInput.length,
+          inputPreview: recInput.slice(0, 500),
+          error: message,
+          ...(recUsage ? { usage: recUsage } : {})
+        });
+      }
       emit({ type: "node-error", nodeId: node.id, label: node.data.label, error: message });
       throw err;
+    }
+
+    if (recordable) {
+      const recFinishedAt = Date.now();
+      nodeRuns.push({
+        nodeId: node.id,
+        label: node.data.label,
+        kind,
+        attempt,
+        status: "succeeded",
+        startedAt: recStartedAt,
+        finishedAt: recReplayed ? recStartedAt : recFinishedAt,
+        durationMs: recReplayed ? 0 : recFinishedAt - recStartedAt,
+        ...(recModel ? { model: recModel } : {}),
+        inputChars: recInput.length,
+        inputPreview: recInput.slice(0, 500),
+        output,
+        ...(recNote ? { error: recNote } : {}),
+        ...(recUsage ? { usage: recUsage } : {}),
+        ...(recReplayed ? { replayed: true } : {}),
+        ...(recContextRefs ? { contextRefs: recContextRefs } : {})
+      });
     }
 
     outputs.set(node.id, output);
@@ -354,11 +861,10 @@ export async function run(
       output
     });
 
-    // autoProposal 节点：输出解析为结构化提案，自动创建到待审核（不自动应用）
+    // autoProposal 节点：输出解析为结构化提案，自动创建到待审核（不自动应用）；契约不满足时抛出错误终止运行
     if (node.data.autoProposal && projectId && output.trim()) {
-      const res = createProposalsFromOutput(projectId, output);
+      const res = createProposalsFromOutput(projectId, output, node.data.label);
       proposalsCreated += res.created;
-      if (res.error) proposalsError = res.error;
     }
 
     const edges = outEdges.get(node.id) ?? [];
@@ -406,7 +912,7 @@ export async function run(
     const finalOutput = endOutput ?? [...outputs.values()].pop() ?? "";
     writeRecord("done");
     emit({ type: "run-done", finalOutput });
-    return { finalOutput, proposalsCreated, ...(proposalsError ? { proposalsError } : {}) };
+    return { finalOutput, proposalsCreated };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     writeRecord("error", error);
