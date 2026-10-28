@@ -12,12 +12,15 @@ export default function ProjectSettingsPage() {
 
   const [title, setTitle] = useState("");
   const [synopsis, setSynopsis] = useState("");
+  const [styleId, setStyleId] = useState("");
+  const styles = useStudio((s) => s.styles); // 全局 store 统一维护，聚焦自动刷新
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
     if (project) {
       setTitle(project.title);
       setSynopsis(project.synopsis);
+      setStyleId(project.styleId ?? "");
       setMsg("");
     }
   }, [project?.id, projects]);
@@ -33,7 +36,11 @@ export default function ProjectSettingsPage() {
 
   async function save() {
     if (!sloth || !project) return;
-    await sloth.novels.updateMeta(project.id, { title: title.trim(), synopsis: synopsis.trim() });
+    await sloth.novels.updateMeta(project.id, {
+      title: title.trim(),
+      synopsis: synopsis.trim(),
+      styleId: styleId || null
+    });
     await refreshProjects();
     setMsg("已保存");
   }
@@ -58,6 +65,23 @@ export default function ProjectSettingsPage() {
           <small>项目文件夹名（位于小说文本目录下）</small>
         </div>
         <span className="setting-value">{project.id}</span>
+      </div>
+      <div className="setting-row">
+        <div>
+          <strong>风格模板</strong>
+          <small>绑定后工作流可用 {"{{style.full}}"} 等插值，审核节点按此校准文风</small>
+        </div>
+        <span className="setting-value">
+          <select className="text-input wf-provider" value={styleId} onChange={(e) => setStyleId(e.target.value)}>
+            <option value="">不绑定</option>
+            {styles.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}（v{s.version}）</option>
+            ))}
+            {styleId && !styles.some((s) => s.id === styleId) && (
+              <option value={styleId}>（模板已删除）</option>
+            )}
+          </select>
+        </span>
       </div>
       <div className="setting-row">
         <div>

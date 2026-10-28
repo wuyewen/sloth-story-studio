@@ -1,13 +1,97 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BookMarked, FolderTree, Layers, PenLine, Library, Loader2, Play, Square, ChevronRight, Plus,
-  CheckCircle2, XCircle, History, Wand2
+  CheckCircle2, XCircle, History, Wand2, Lock, Unlock, Trash2, Pencil, ScanSearch
 } from "lucide-react";
 import { sloth } from "../../api";
 import { useStudio } from "../../state/store";
+import { useFocusRefresh } from "../hooks/useFocusRefresh";
 import { Modal, ConfirmDialog } from "../components/Modal";
-import type { MemoryFileInfo, MemoryProposal, MemoryVersion, WorkflowRunEvent, WorkflowRunRecord } from "../../../shared/types";
+import type { MemoryFileInfo, MemoryProposal, MemoryVersion, NodeRunRecord, StateEntity, StateEntityType, StateExtractItem, WorkflowRunEvent, WorkflowRunRecord } from "../../../shared/types";
 import CustomFlowModal from "./workbench/CustomFlowModal";
+
+const STATE_TYPE_LABEL: Record<StateEntityType, string> = {
+  character: "角色",
+  foreshadowing: "伏笔",
+  event: "事件",
+  item: "物品",
+  rule: "规则",
+  location: "地点"
+};
+
+const STATE_TYPE_ORDER: StateEntityType[] = ["character", "foreshadowing", "event", "item", "rule", "location"];
+
+// 运行详情里的「节点执行时间线」：按执行顺序列出 agent/prompt 节点，可展开查看输入与完整输出
+function NodeRunsTimeline({ nodeRuns, usage }: { nodeRuns: NodeRunRecord[]; usage?: WorkflowRunRecord["usage"] }) {
+  const [open, setOpen] = useState<Set<number>>(new Set());
+  const toggle = (i: number) =>
+    setOpen((s) => {
+      const next = new Set(s);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+  const totalMs = nodeRuns.reduce((sum, n) => sum + n.durationMs, 0);
+  return (
+    <div className="form-row">
+      <span className="form-label">节点执行时间线（{nodeRuns.length} 个节点）</span>
+      <div className="nr-summary">
+        <span>LLM 调用 {usage ? usage.calls : nodeRuns.filter((n) => n.status === "succeeded").length} 次</span>
+        <span>
+          总 tokens {usage ? usage.totalTokens : "-"}
+          {usage?.unknown && "（部分模型未返回用量）"}
+        </span>
+        <span>总耗时 {(totalMs / 1000).toFixed(1)} 秒</span>
+      </div>
+      <div className="nr-list">
+        {nodeRuns.map((nr, i) => (
+          <div key={`${nr.nodeId}-${nr.attempt}-${i}`} className={`nr-item ${nr.status === "failed" ? "is-failed" : ""}`}>
+            <button className="nr-head" onClick={() => toggle(i)}>
+              <span className="nr-idx">{i + 1}</span>
+              {nr.status === "succeeded" ? (
+                <CheckCircle2 size={13} className="run-ok" />
+              ) : (
+                <XCircle size={13} className="run-fail" />
+              )}
+              <strong>
+                {nr.label}
+                {nr.attempt > 1 && `（第${nr.attempt}次）`}
+              </strong>
+              <small>{(nr.durationMs / 1000).toFixed(1)}s</small>
+              <small>{nr.usage?.totalTokens != null ? `${nr.usage.totalTokens} tok` : "-"}</small>
+              {nr.model && <small className="nr-model">{nr.model}</small>}
+            </button>
+            {open.has(i) && (
+              <div className="nr-detail">
+                {nr.contextRefs && nr.contextRefs.length > 0 && (
+                  <div className="nr-ctx-refs">
+                    {nr.contextRefs.map((r, ri) => (
+                      <span key={ri} className={`nr-ctx-ref ${r.chars === 0 ? "is-skipped" : ""}`}>
+                        {r.source}{r.chars > 0 ? ` ${r.chars}字` : ""}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <span className="form-label">输入（共 {nr.inputChars} 字符，以下为前 500 字）</span>
+                <pre className="prop-diff-text nr-text">{nr.inputPreview || "（空）"}</pre>
+                {nr.error ? (
+                  <p className="inline-msg err">{nr.error}</p>
+                ) : (
+                  nr.output !== undefined && (
+                    <>
+                      <span className="form-label">输出</span>
+                      <pre className="prop-diff-text nr-text">{nr.output || "（空）"}</pre>
+                    </>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 interface TimelineItem {
   key: number;
@@ -114,7 +198,7 @@ export default function WorkbenchPage() {
     const updated = list.find((p) => p.id === project.id);
     const created = updated?.chapters[updated.chapters.length - 1];
     if (created) {
-      await sloth.novels.writeChapter(project.id, created.id, text);
+      await sloth.novels.writeChapter(project.id, created.id, text, "workflow");
       if (unit) await sloth.novels.setChapterUnit(project.id, created.id, unit.id);
     }
     await refreshProjects();
@@ -133,7 +217,48 @@ export default function WorkbenchPage() {
   const seq = useRef(0);
   const cleanups = useRef<(() => void)[]>([]);
 
+  // 入口守卫：明显的误操作给提示（可继续），完全无意义的操作直接拦下
+  const [runGuard, setRunGuard] = useState<{ title: string; message: string; block?: boolean; onOk?: () => void } | null>(null);
+
   function openRun(prefix: string) {
+    if (!project) return;
+    const unitCount = project.units.length;
+    const curChapters = unit?.chapterIds.length ?? 0;
+
+    if (prefix === "WF03" && unitCount === 0) {
+      setRunGuard({ title: "创作下一章", message: "还没有故事单元。请先用「规划新单元」创建单元，再创作章节。", block: true });
+      return;
+    }
+    if (prefix === "WF04" && curChapters === 0) {
+      setRunGuard({ title: "单元复盘", message: `当前单元「${unit?.title ?? "未选择"}」还没有章节，暂无可复盘内容。`, block: true });
+      return;
+    }
+    if (prefix === "WF02" && unitCount > 0 && curChapters > 0) {
+      setRunGuard({
+        title: "规划新单元",
+        message: `当前单元「${unit?.title}」已有 ${curChapters} 章。如果它已完结，建议先运行「单元复盘」归档交接，再开启新单元。仍要继续吗？`,
+        onOk: () => doOpenRun(prefix)
+      });
+      return;
+    }
+    if (prefix === "WF01") {
+      void sloth?.novels.memoryList(project.id).then((files) => {
+        if (files.some((f) => f.rel === "master-outline.md")) {
+          setRunGuard({
+            title: "全书规划",
+            message: "已存在全书大纲。再次运行会生成新的规划提案——不会直接覆盖现有记忆，需你在提案区审核接受。继续运行吗？",
+            onOk: () => doOpenRun(prefix)
+          });
+        } else {
+          doOpenRun(prefix);
+        }
+      });
+      return;
+    }
+    doOpenRun(prefix);
+  }
+
+  function doOpenRun(prefix: string) {
     const slot = PREFIX_TO_SLOT[prefix];
     const slotWfId = slot ? project?.workflowSlots?.[slot] : undefined;
     const wf = (slotWfId ? workflows.find((w) => w.id === slotWfId) : null) ?? findWorkflow(workflows, prefix);
@@ -148,8 +273,8 @@ export default function WorkbenchPage() {
     setChapterMsg("");
   }
 
-  function startRun() {
-    if (!sloth || !runWf || !project) return;
+  function beginRun(wf: { id: string; name: string }, inputText: string, resumeFromRunId?: string) {
+    if (!sloth || !project) return;
     const runId = crypto.randomUUID();
     runIdRef.current = runId;
     setTimeline([]);
@@ -188,14 +313,13 @@ export default function WorkbenchPage() {
     });
     cleanups.current.push(off);
     void sloth.workflows
-      .run(runId, runWf.id, runInput.trim(), project.id)
+      .run(runId, wf.id, inputText, project.id, resumeFromRunId)
       .then((res) => {
         if (res?.error) setRunError(res.error);
         if (res?.finalOutput) setFinalOutput(res.finalOutput);
         if (res?.proposalsCreated) setPropMsg({ kind: "ok", text: `已自动创建 ${res.proposalsCreated} 条记忆提案，请到「待审核的记忆提案」查看并确认。` });
-        if (res?.proposalsError) setPropMsg({ kind: "err", text: `提案解析失败：${res.proposalsError}（节点输出需为 JSON 数组）` });
         // 「章节创作」槽位的工作流：终稿自动存入当前单元的新章节
-        const isChapterWf = project.workflowSlots?.chapter === runWf.id || runWf.name.includes("章节创作");
+        const isChapterWf = project.workflowSlots?.chapter === wf.id || wf.name.includes("章节创作");
         if (res?.finalOutput && isChapterWf) {
           void saveAsChapter(res.finalOutput).then((t) => {
             if (t) setChapterMsg(`已自动存入新章节《${t}》（当前单元）`);
@@ -210,6 +334,25 @@ export default function WorkbenchPage() {
         setRunning(false);
       })
       .finally(() => off());
+  }
+
+  function startRun() {
+    if (!runWf) return;
+    beginRun(runWf, runInput.trim());
+  }
+
+  // 断点续跑：以同一工作流 + 原输入 + resumeFromRunId 发起新运行，已成功的节点复用上次输出
+  function resumeRun(rec: WorkflowRunRecord) {
+    const wf = workflows.find((w) => w.id === rec.workflowId);
+    if (!wf || !project) return;
+    const inputText = (rec.input ?? "").trim();
+    setRunDetail(null);
+    setRunWf({ id: wf.id, name: wf.name });
+    setRunMinimized(false);
+    setRunInput(rec.input ?? "");
+    setPropMsg(null);
+    setChapterMsg("");
+    beginRun({ id: wf.id, name: wf.name }, inputText, rec.runId);
   }
 
   function stopRun() {
@@ -234,7 +377,7 @@ export default function WorkbenchPage() {
     if (sloth && project) setRuns(await sloth.novels.runHistory(project.id));
   }
 
-  useEffect(() => {
+  useFocusRefresh(() => {
     if (!sloth || !project) {
       setProposals([]);
       setRuns([]);
@@ -304,6 +447,117 @@ export default function WorkbenchPage() {
   const [historyPreview, setHistoryPreview] = useState<{ ts: number; content: string } | null>(null);
   const [memDeleting, setMemDeleting] = useState(false);
 
+  // ---- 结构化状态库（FR-03）----
+  const [memTab, setMemTab] = useState<"files" | "state">("files");
+  const [stateEntities, setStateEntities] = useState<StateEntity[]>([]);
+  const [stateEdit, setStateEdit] = useState<{ id?: string; type: StateEntityType; name: string; data: string } | null>(null);
+  const [stateDeleting, setStateDeleting] = useState<StateEntity | null>(null);
+
+  async function refreshState() {
+    if (sloth && project) setStateEntities(await sloth.novels.stateList(project.id));
+  }
+
+  async function saveStateEntity() {
+    if (!sloth || !project || !stateEdit || !stateEdit.name.trim()) return;
+    await sloth.novels.stateUpsert(project.id, {
+      ...(stateEdit.id ? { id: stateEdit.id } : {}),
+      type: stateEdit.type,
+      name: stateEdit.name.trim(),
+      data: stateEdit.data,
+      status: "confirmed", // 作者手动维护的实体视为已确认
+      clearConflict: true
+    });
+    setStateEdit(null);
+    await refreshState();
+  }
+
+  async function toggleStateLock(e: StateEntity) {
+    if (!sloth || !project) return;
+    await sloth.novels.stateSetLock(project.id, e.id, !e.locked);
+    await refreshState();
+  }
+
+  async function deleteStateEntity() {
+    if (!sloth || !project || !stateDeleting) return;
+    await sloth.novels.stateRemove(project.id, stateDeleting.id);
+    setStateDeleting(null);
+    await refreshState();
+  }
+
+  // ---- 章节记忆提取（FR-04）----
+  const [extractOpen, setExtractOpen] = useState(false);
+  const [extractUnitId, setExtractUnitId] = useState("");
+  const [extractChapterId, setExtractChapterId] = useState("");
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState("");
+  const [extractReview, setExtractReview] = useState<{ chapterTitle: string; items: StateExtractItem[] } | null>(null);
+  const [extractChecked, setExtractChecked] = useState<Set<number>>(new Set());
+  const [extractApplying, setExtractApplying] = useState(false);
+  const [extractMsg, setExtractMsg] = useState("");
+
+  function openExtract() {
+    if (!project) return;
+    const u = unit ?? project.units[project.units.length - 1] ?? null;
+    setExtractUnitId(u?.id ?? "");
+    const chapterIds = u?.chapterIds ?? [];
+    setExtractChapterId(chapterIds[chapterIds.length - 1] ?? ""); // 默认最新章节
+    setExtractError("");
+    setExtractMsg("");
+    setExtractOpen(true);
+  }
+
+  const extractChapters = useMemo(() => {
+    if (!project) return [];
+    const u = project.units.find((x) => x.id === extractUnitId);
+    return (u?.chapterIds ?? [])
+      .map((id) => project.chapters.find((c) => c.id === id))
+      .filter((c): c is NonNullable<typeof c> => Boolean(c));
+  }, [project, extractUnitId]);
+
+  async function runExtract() {
+    if (!sloth || !project || !extractChapterId) return;
+    setExtracting(true);
+    setExtractError("");
+    try {
+      const res = await sloth.novels.extractChapterState(project.id, {
+        unitId: extractUnitId || undefined,
+        chapterId: extractChapterId
+      });
+      setExtractReview(res);
+      // 新增和更新默认勾选，冲突项默认不勾选
+      setExtractChecked(new Set(res.items.map((it, i) => (it.relation === "conflict" ? -1 : i)).filter((i) => i >= 0)));
+      setExtractOpen(false);
+    } catch (err) {
+      setExtractError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+  async function applyExtract() {
+    if (!sloth || !project || !extractReview) return;
+    setExtractApplying(true);
+    try {
+      for (const [i, it] of extractReview.items.entries()) {
+        if (!extractChecked.has(i)) continue;
+        await sloth.novels.stateUpsert(project.id, {
+          type: it.entity.type,
+          name: it.entity.name,
+          data: it.entity.data,
+          status: it.entity.status,
+          ...(it.entity.source ? { source: it.entity.source } : {}),
+          // 冲突项用户勾选应用 = 强制覆盖，旧值由主进程记入 conflict 备注
+          ...(it.relation === "conflict" ? { force: true } : {})
+        });
+      }
+      setExtractReview(null);
+      setExtractMsg(`已应用 ${extractChecked.size} 条状态到结构化状态库`);
+      await refreshState();
+    } finally {
+      setExtractApplying(false);
+    }
+  }
+
   async function openMemory() {
     if (!sloth || !project) return;
     setMemFiles(await sloth.novels.memoryList(project.id));
@@ -311,6 +565,8 @@ export default function WorkbenchPage() {
     setMemContent("");
     setMemDirty(false);
     setMemMsg("");
+    setMemTab("files");
+    setStateEntities(await sloth.novels.stateList(project.id));
     setMemOpen(true);
   }
 
@@ -403,6 +659,11 @@ export default function WorkbenchPage() {
                 <strong className="wb-proj-title">{project.title}</strong>
                 <span className="wb-local-badge">本地项目</span>
               </div>
+              <div className="wb-proj-stats">
+                <span>{project.units.length} 个单元</span>
+                <span>{project.chapters.length} 章</span>
+                <span>{project.chapters.reduce((sum, c) => sum + (c.words ?? 0), 0).toLocaleString()} 字</span>
+              </div>
               {project.synopsis && <p className="wb-synopsis">{project.synopsis}</p>}
             </div>
             <div className="wb-stat">
@@ -412,6 +673,10 @@ export default function WorkbenchPage() {
                   <option key={u.id} value={u.id}>{u.title}</option>
                 ))}
               </select>
+              <button className="ghost-button small wb-extract-btn" onClick={openExtract} title="从章节正文提取角色/伏笔/事件等结构化状态">
+                <ScanSearch size={13} /> 提取章节记忆
+              </button>
+              {extractMsg && <small className="wb-extract-msg">{extractMsg}</small>}
             </div>
             <div className="wb-stat">
               <span className="form-label">本单元进度</span>
@@ -591,9 +856,11 @@ export default function WorkbenchPage() {
               {propMsg && <p className={`inline-msg ${propMsg.kind}`}>{propMsg.text}</p>}
               {chapterMsg && <p className="inline-msg ok">{chapterMsg}</p>}
               <div className="output-actions">
-                <button className="ghost-button small" onClick={() => void saveAsChapter(finalOutput).then((t) => t && setChapterMsg(`已存入新章节《${t}》（当前单元）`))}>
-                  存入新章节
-                </button>
+                {(project?.workflowSlots?.chapter === runWf.id || runWf.name.includes("章节创作")) && (
+                  <button className="ghost-button small" onClick={() => void saveAsChapter(finalOutput).then((t) => t && setChapterMsg(`已存入新章节《${t}》（当前单元）`))}>
+                    存入新章节
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -615,6 +882,56 @@ export default function WorkbenchPage() {
 
       {memOpen && project && (
         <Modal title={`共享记忆 · ${project.title}`} onClose={() => setMemOpen(false)} width={860}>
+          <div className="segmented mem-tabs">
+            <button className={memTab === "files" ? "active" : ""} onClick={() => setMemTab("files")}>记忆文件</button>
+            <button className={memTab === "state" ? "active" : ""} onClick={() => setMemTab("state")}>结构化状态</button>
+          </div>
+          {memTab === "state" ? (
+            <div className="state-panel">
+              <div className="state-panel-head">
+                <small>状态实体存于 memory/state.json，并自动物化为 state-characters.md 等文件，工作流可用 {"{{memory.state-characters}}"} 引用。</small>
+                <button
+                  className="ghost-button small"
+                  onClick={() => setStateEdit({ type: "character", name: "", data: "" })}
+                >
+                  <Plus size={13} /> 新增实体
+                </button>
+              </div>
+              {stateEntities.length === 0 && <div className="wb-empty">暂无状态实体。可通过「提取章节记忆」从章节正文自动提取，或手动新增。</div>}
+              {STATE_TYPE_ORDER.map((type) => {
+                const group = stateEntities.filter((e) => e.type === type);
+                if (group.length === 0) return null;
+                return (
+                  <div key={type} className="state-group">
+                    <div className="state-group-head">{STATE_TYPE_LABEL[type]}（{group.length}）</div>
+                    {group.map((e) => (
+                      <div key={e.id} className="state-item">
+                        <div className="state-item-head">
+                          <strong>{e.name}</strong>
+                          <span className={`state-badge ${e.status === "confirmed" ? "is-confirmed" : "is-inferred"}`}>
+                            {e.status === "confirmed" ? "已确认" : "推断"}
+                          </span>
+                          {e.source && <small className="state-source">来源：{e.source}</small>}
+                          <span className="flex-spacer" />
+                          <button className="icon-button tiny" title={e.locked ? "解锁（允许提取覆盖）" : "锁定（提取不得覆盖）"} onClick={() => void toggleStateLock(e)}>
+                            {e.locked ? <Lock size={12} /> : <Unlock size={12} />}
+                          </button>
+                          <button className="icon-button tiny" title="编辑" onClick={() => setStateEdit({ id: e.id, type: e.type, name: e.name, data: e.data })}>
+                            <Pencil size={12} />
+                          </button>
+                          <button className="icon-button tiny danger-text" title="删除" onClick={() => setStateDeleting(e)}>
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                        <p className="state-data">{e.data}</p>
+                        {e.conflict && <p className="state-conflict">【冲突】{e.conflict}</p>}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
           <div className="mem-layout">
             <div className="mem-list">
               {memFiles.map((f) => (
@@ -649,7 +966,171 @@ export default function WorkbenchPage() {
               )}
             </div>
           </div>
+          )}
         </Modal>
+      )}
+
+      {extractOpen && project && (
+        <Modal title="提取章节记忆" onClose={() => setExtractOpen(false)} width={520}>
+          <p className="prop-reason">从章节正文中提取角色、伏笔、事件等结构化状态，审阅确认后写入状态库。</p>
+          <label className="form-row">
+            <span className="form-label">故事单元</span>
+            <select
+              className="text-input"
+              value={extractUnitId}
+              onChange={(e) => {
+                const uid = e.target.value;
+                setExtractUnitId(uid);
+                const u = project.units.find((x) => x.id === uid);
+                const ids = u?.chapterIds ?? [];
+                setExtractChapterId(ids[ids.length - 1] ?? "");
+              }}
+            >
+              {project.units.map((u) => (
+                <option key={u.id} value={u.id}>{u.title}</option>
+              ))}
+            </select>
+          </label>
+          <label className="form-row">
+            <span className="form-label">章节</span>
+            <select className="text-input" value={extractChapterId} onChange={(e) => setExtractChapterId(e.target.value)}>
+              {extractChapters.length === 0 && <option value="">该单元暂无章节</option>}
+              {extractChapters.map((c) => (
+                <option key={c.id} value={c.id}>{c.title}{c.words > 0 ? `（${c.words} 字）` : "（空）"}</option>
+              ))}
+            </select>
+          </label>
+          {extractError && <p className="inline-msg err">{extractError}</p>}
+          <div className="modal-actions">
+            <button className="ghost-button" onClick={() => setExtractOpen(false)}>取消</button>
+            <button className="primary-button" disabled={extracting || !extractChapterId} onClick={() => void runExtract()}>
+              {extracting ? <Loader2 size={14} className="spin" /> : <ScanSearch size={14} />}
+              {extracting ? "提取中…" : "开始提取"}
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {extractReview && project && (
+        <Modal title={`提取结果 · ${extractReview.chapterTitle}`} onClose={() => setExtractReview(null)} width={640}>
+          <p className="prop-reason">
+            共 {extractReview.items.length} 条候选；新增和更新已默认勾选，冲突项需手动确认（应用时会覆盖现有内容，旧值保留在冲突备注中）。
+          </p>
+          {extractReview.items.length === 0 && <div className="wb-empty">本章没有提取到新增或变化的状态。</div>}
+          <div className="extract-list">
+            {extractReview.items.map((it, i) => (
+              <label key={i} className={`extract-item rel-${it.relation}`}>
+                <input
+                  type="checkbox"
+                  checked={extractChecked.has(i)}
+                  onChange={() =>
+                    setExtractChecked((s) => {
+                      const next = new Set(s);
+                      if (next.has(i)) next.delete(i);
+                      else next.add(i);
+                      return next;
+                    })
+                  }
+                />
+                <div className="extract-item-body">
+                  <div className="extract-item-head">
+                    <span className="state-badge neutral">{STATE_TYPE_LABEL[it.entity.type]}</span>
+                    <strong>{it.entity.name}</strong>
+                    <span className={`state-badge rel-${it.relation}`}>
+                      {it.relation === "new" ? "新增" : it.relation === "update" ? "更新" : "冲突"}
+                    </span>
+                    <span className={`state-badge ${it.entity.status === "confirmed" ? "is-confirmed" : "is-inferred"}`}>
+                      {it.entity.status === "confirmed" ? "已确认" : "推断"}
+                    </span>
+                    {it.entity.source && <small className="state-source">{it.entity.source}</small>}
+                  </div>
+                  <pre className="prop-diff-text extract-data">{it.entity.data}</pre>
+                  {it.relation !== "new" && it.existingData !== undefined && (
+                    <pre className="prop-diff-text extract-data is-existing">现有：{it.existingData}</pre>
+                  )}
+                </div>
+              </label>
+            ))}
+          </div>
+          <div className="modal-actions">
+            <button className="ghost-button" onClick={() => setExtractReview(null)}>取消</button>
+            <button
+              className="primary-button"
+              disabled={extractApplying || extractChecked.size === 0}
+              onClick={() => void applyExtract()}
+            >
+              {extractApplying ? <Loader2 size={14} className="spin" /> : null}
+              应用所选（{extractChecked.size}）
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {stateEdit && (
+        <Modal title={stateEdit.id ? "编辑状态实体" : "新增状态实体"} onClose={() => setStateEdit(null)} width={520}>
+          {!stateEdit.id && (
+            <label className="form-row">
+              <span className="form-label">类型</span>
+              <select
+                className="text-input"
+                value={stateEdit.type}
+                onChange={(e) => setStateEdit({ ...stateEdit, type: e.target.value as StateEntityType })}
+              >
+                {STATE_TYPE_ORDER.map((t) => (
+                  <option key={t} value={t}>{STATE_TYPE_LABEL[t]}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label className="form-row">
+            <span className="form-label">名称</span>
+            <input
+              className="text-input"
+              value={stateEdit.name}
+              onChange={(e) => setStateEdit({ ...stateEdit, name: e.target.value })}
+              placeholder="如：林渡 / F02 你是第一个查契约的"
+            />
+          </label>
+          <label className="form-row">
+            <span className="form-label">状态描述（Markdown）</span>
+            <textarea
+              className="text-input"
+              rows={8}
+              value={stateEdit.data}
+              onChange={(e) => setStateEdit({ ...stateEdit, data: e.target.value })}
+            />
+          </label>
+          <div className="modal-actions">
+            <button className="ghost-button" onClick={() => setStateEdit(null)}>取消</button>
+            <button className="primary-button" disabled={!stateEdit.name.trim()} onClick={() => void saveStateEntity()}>
+              保存
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {stateDeleting && (
+        <ConfirmDialog
+          title="删除状态实体"
+          message={`确定删除「${stateDeleting.name}」（${STATE_TYPE_LABEL[stateDeleting.type]}）吗？删除后物化的状态文件将同步更新。`}
+          onCancel={() => setStateDeleting(null)}
+          onConfirm={() => void deleteStateEntity()}
+        />
+      )}
+
+      {runGuard && (
+        <ConfirmDialog
+          title={runGuard.title}
+          message={runGuard.message}
+          blockConfirm={runGuard.block}
+          confirmText="仍要继续"
+          onCancel={() => setRunGuard(null)}
+          onConfirm={() => {
+            const fn = runGuard.onOk;
+            setRunGuard(null);
+            fn?.();
+          }}
+        />
       )}
 
       {runDetail && (
@@ -662,8 +1143,23 @@ export default function WorkbenchPage() {
             <span>耗时 {Math.max(1, Math.round((runDetail.endedAt - runDetail.startedAt) / 1000))} 秒</span>
             <span>{runDetail.steps} 步</span>
             {runDetail.artifactPath && <span>产物：{runDetail.artifactPath}</span>}
+            {(() => {
+              const wfBudget = workflows.find((w) => w.id === runDetail.workflowId)?.budget;
+              if (!wfBudget || !runDetail.usage) return null;
+              const parts: string[] = [];
+              if (wfBudget.maxCalls) parts.push(`调用 ${runDetail.usage.calls}/${wfBudget.maxCalls} 次`);
+              if (wfBudget.maxTokens && !runDetail.usage.unknown) parts.push(`token ${runDetail.usage.totalTokens}/${wfBudget.maxTokens}`);
+              if (parts.length === 0) return null;
+              return <span>预算消耗：{parts.join(" · ")}</span>;
+            })()}
           </div>
           {runDetail.error && <p className="inline-msg err">{runDetail.error}</p>}
+          {runDetail.input && (
+            <div className="form-row">
+              <span className="form-label">运行输入</span>
+              <pre className="prop-diff-text nr-text">{runDetail.input}</pre>
+            </div>
+          )}
           {runDetail.memoryRefs.length > 0 && (
             <div className="form-row">
               <span className="form-label">本次读取的记忆（{runDetail.memoryRefs.length} 份）</span>
@@ -673,6 +1169,9 @@ export default function WorkbenchPage() {
                 ))}
               </div>
             </div>
+          )}
+          {runDetail.nodeRuns && runDetail.nodeRuns.length > 0 && (
+            <NodeRunsTimeline key={runDetail.runId} nodeRuns={runDetail.nodeRuns} usage={runDetail.usage} />
           )}
           {runDetail.finalOutput ? (
             <div className="form-row">
@@ -691,6 +1190,16 @@ export default function WorkbenchPage() {
             )
           )}
           <div className="modal-actions">
+            {(runDetail.status === "error" || runDetail.status === "stopped") &&
+              runDetail.nodeRuns?.some((n) => n.status === "succeeded") &&
+              workflows.some((w) => w.id === runDetail.workflowId) && (
+                <div className="resume-run">
+                  <button className="primary-button" onClick={() => resumeRun(runDetail)}>
+                    从断点继续
+                  </button>
+                  <small>已完成的节点将复用上次结果，不重复调用模型</small>
+                </div>
+              )}
             {runDetail.artifactPath && (
               <button
                 className="ghost-button"

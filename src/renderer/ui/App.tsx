@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BookOpen, Home, Sparkles, Workflow, Search, ChevronRight, SlidersHorizontal, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { BookOpen, Home, Palette, Sparkles, Workflow, Search, ChevronRight, SlidersHorizontal, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { sloth } from "../api";
 import { useStudio } from "../state/store";
 import { BridgeMissing } from "./components/Modal";
@@ -9,10 +9,11 @@ import WorkflowsPage from "./pages/WorkflowsPage";
 import WorkbenchPage from "./pages/WorkbenchPage";
 import ProjectSettingsPage from "./pages/ProjectSettingsPage";
 import ProjectWorkflowsPage from "./pages/ProjectWorkflowsPage";
+import StylesPage from "./pages/StylesPage";
 import HomePage from "./pages/HomePage";
 import type { ItemGroup } from "../../shared/types";
 
-type Page = "home" | "workbench" | "editor" | "agents" | "workflows" | "project-settings" | "project-workflows";
+type Page = "home" | "workbench" | "editor" | "agents" | "workflows" | "styles" | "project-settings" | "project-workflows";
 
 const pageTitle: Record<Page, string> = {
   home: "首页",
@@ -20,6 +21,7 @@ const pageTitle: Record<Page, string> = {
   editor: "章节编辑器",
   agents: "智能体",
   workflows: "工作流",
+  styles: "风格模板",
   "project-settings": "项目设置",
   "project-workflows": "工作流管理"
 };
@@ -264,6 +266,13 @@ export default function App() {
             setActiveGroup={setActiveWorkflowGroup}
             onDropItem={(itemId, gid) => void sloth?.workflows.setGroup(itemId, gid).then(() => refreshWorkflows())}
           />
+          <button
+            className={`nav-item nav-l2 ${page === "styles" ? "active" : ""}`}
+            onClick={() => setPage("styles")}
+          >
+            <Palette size={18} strokeWidth={1.8} />
+            <span>风格模板</span>
+          </button>
         </nav>
         </div>
         <div className="sidebar-bottom">
@@ -312,6 +321,9 @@ export default function App() {
         </div>
         <div className={`page-content page-fill ${page === "workflows" ? "" : "page-hidden"}`}>
           <WorkflowsPage />
+        </div>
+        <div className={`page-content ${page === "styles" ? "" : "page-hidden"}`}>
+          <StylesPage />
         </div>
         <div className={`page-content ${page === "project-settings" ? "" : "page-hidden"}`}>
           <ProjectSettingsPage />

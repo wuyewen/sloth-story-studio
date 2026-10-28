@@ -6,6 +6,7 @@ import type {
   ItemGroup,
   ModelProviderInfo,
   NovelProject,
+  StyleProfile,
   WorkflowDef
 } from "../../shared/types";
 
@@ -15,6 +16,7 @@ interface StudioState {
   agents: AgentProfile[];
   projects: NovelProject[];
   workflows: WorkflowDef[];
+  styles: StyleProfile[];
   settings: AppSettings | null;
   currentProjectId: string | null; // 侧边栏选中的小说项目（树形导航）
   workbenchMemoryOpen: boolean; // 「记忆管理」导航时自动打开记忆弹窗
@@ -34,6 +36,7 @@ interface StudioState {
   refreshAgents: () => Promise<void>;
   refreshProjects: () => Promise<void>;
   refreshWorkflows: () => Promise<void>;
+  refreshStyles: () => Promise<void>;
   patchSettings: (patch: Partial<AppSettings>) => Promise<void>;
 }
 
@@ -43,6 +46,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   agents: [],
   projects: [],
   workflows: [],
+  styles: [],
   settings: null,
   currentProjectId: null,
   workbenchMemoryOpen: false,
@@ -71,16 +75,17 @@ export const useStudio = create<StudioState>((set, get) => ({
       set({ ready: true });
       return;
     }
-    const [providers, agents, projects, workflows, settings, agentGroups, workflowGroups] = await Promise.all([
+    const [providers, agents, projects, workflows, settings, agentGroups, workflowGroups, styles] = await Promise.all([
       sloth.models.list(),
       sloth.agents.list(),
       sloth.novels.list(),
       sloth.workflows.list(),
       sloth.settings.get(),
       sloth.agents.listGroups(),
-      sloth.workflows.listGroups()
+      sloth.workflows.listGroups(),
+      sloth.styles.list()
     ]);
-    set({ providers, agents, projects, workflows, settings, agentGroups, workflowGroups, ready: true });
+    set({ providers, agents, projects, workflows, settings, agentGroups, workflowGroups, styles, ready: true });
     sloth.settings.onChanged((next) => {
       set({ settings: next });
       // 目录类设置变化后，相关数据可能来自新位置，全部刷新
@@ -88,6 +93,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       void get().refreshWorkflows();
       void get().refreshProjects();
       void get().refreshGroups();
+      void get().refreshStyles();
     });
     sloth.models.onChanged((next) => set({ providers: next }));
     sloth.app.onFocus(() => {
@@ -96,6 +102,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       void get().refreshAgents();
       void get().refreshProjects();
       void get().refreshGroups();
+      void get().refreshStyles();
     });
   },
 
@@ -117,6 +124,11 @@ export const useStudio = create<StudioState>((set, get) => ({
   async refreshWorkflows() {
     if (!sloth) return;
     set({ workflows: await sloth.workflows.list() });
+  },
+
+  async refreshStyles() {
+    if (!sloth) return;
+    set({ styles: await sloth.styles.list() });
   },
 
   async patchSettings(patch) {

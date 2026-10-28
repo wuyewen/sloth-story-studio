@@ -106,7 +106,7 @@ input[type=range]{accent-color:var(--coral);width:100%}
 .empty-note{display:flex;align-items:center;gap:8px;justify-content:center;color:#a3a49f;font-size:11px;margin-top:26px}
 
 /* ---- 编辑器三栏 ---- */
-.editor-grid{flex:1;min-height:0;display:grid;grid-template-columns:230px minmax(0,1fr) 340px;gap:14px}
+.editor-grid{flex:1;min-height:0;display:grid;grid-template-columns:170px 200px minmax(0,1fr) 340px;gap:12px}
 .editor-col{background:#fffefa;border:1px solid #ece9e2;border-radius:13px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .col-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #f0eee7;font-size:11px;font-weight:700;letter-spacing:.6px;color:#8f938f}
 .proj-list{flex:1;overflow:auto;padding:8px}
@@ -444,3 +444,128 @@ input[type=range]{accent-color:var(--coral);width:100%}
 .ctx-item.danger{color:#c0392b}
 
 .wb-proj-title{font-size:16px;color:#2b3035}
+
+/* ---- 结构化审核 / 局部修订节点 ---- */
+.wf-node.review-node{border-color:#d8e0d2;background:#fbfdf9}
+.wf-node.patch-node{border-color:#e8dcc0;background:#fdfaf2}
+.wf-dim-list{display:flex;flex-direction:column;gap:4px;max-height:180px;overflow-y:auto;margin-top:4px}
+.wf-dim-item{display:flex;align-items:center;gap:6px;font-size:10px;color:#4b525a;cursor:pointer}
+.wf-dim-item input{accent-color:var(--coral)}
+.wf-patch-src{margin-top:6px}
+.wf-end-src{margin-top:6px;font-size:9px}
+
+/* ---- 上下文构建节点 ---- */
+.wf-node.context-node{border-color:#d3dce8;background:#f7fafd}
+.wf-ctx-nums{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+.wf-ctx-nums .wf-node-limits{margin-top:0}
+.nr-ctx-refs{display:flex;flex-wrap:wrap;gap:5px}
+.nr-ctx-ref{font-size:9px;background:#eef0f5;border-radius:5px;padding:3px 8px;color:#5a6b82}
+.nr-ctx-ref.is-skipped{background:#f5f2ea;color:#a0a2a4;text-decoration:line-through}
+
+/* ---- 章节版本历史 ---- */
+.chv-badge{margin-left:6px;font-size:8px;padding:2px 6px;border-radius:4px;background:#f0ede5;color:#8d8f8a}
+.chv-badge.src-manual{background:#e8eef6;color:#4a6f9e}
+.chv-badge.src-workflow{background:#eaf4ec;color:#4a8f5d}
+.chv-badge.src-rollback{background:#fdf3e3;color:#b07d2a}
+.chv-tabs{margin-bottom:8px}
+.chv-diff{font-family:ui-monospace,Menlo,monospace;font-size:10px;line-height:1.7;padding:0;overflow:auto}
+.chv-line{padding:1px 12px;white-space:pre-wrap;word-break:break-word;color:#4b525a}
+.chv-line.is-add{background:#eaf4ec;color:#3a6b47}
+.chv-line.is-del{background:#fdeaea;color:#a13b2e}
+.chv-line.is-same{color:#9a9ea4}
+.chv-fold{padding:3px 12px;color:#a3a4a2;font-size:9px;background:#f5f3ec}
+
+/* ---- 运行预算 ---- */
+.wf-budget-tag{font-size:8px;color:#b07d2a;background:#fdf3e3;border-radius:4px;padding:2px 5px}
+
+/* ---- 边条件可视化编辑器 ---- */
+.cond-editor{display:flex;flex-direction:column;gap:8px}
+.cond-rules{display:flex;flex-direction:column;gap:8px}
+.cond-rule{display:flex;flex-direction:column;gap:6px;border:1px solid #f0eee7;border-radius:8px;padding:8px;background:#fbfaf6}
+.cond-rule-row{display:flex;gap:6px;align-items:center}
+.cond-rule-row .text-input{min-width:0;flex:1}
+.cond-count{max-width:70px;flex:none!important}
+.cond-combiner{width:88px;margin:0 auto}
+.cond-preview{font-family:ui-monospace,Menlo,monospace;font-size:9px;color:#a0a2a4;word-break:break-all;line-height:1.6;background:#fbfaf6;border:1px solid #f0eee7;border-radius:7px;padding:6px 8px}
+
+/* ---- 风格模板 ---- */
+.styles-page{max-width:1100px}
+.styles-head{margin-top:0}
+.styles-head h1{font-size:30px;margin:10px 0}
+.styles-head p{margin:0;color:#8d8b82;font-size:12px}
+.styles-head .primary-button{flex-shrink:0}
+.style-tags{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 12px;min-height:20px}
+.style-tag{font-size:9px;padding:3px 8px;border-radius:5px;background:#f3e6dd;color:#b46d5c}
+.style-tag.is-tone{background:#eef0eb;color:#78879e}
+
+/* ---- 节点执行时间线 ---- */
+.nr-summary{display:flex;gap:14px;flex-wrap:wrap;font-size:10px;color:#737b85;background:#fbfaf6;border:1px solid #efece3;border-radius:10px;padding:9px 12px;margin-bottom:8px}
+.nr-list{display:flex;flex-direction:column;gap:6px}
+.nr-item{border:1px solid #ece9e2;border-radius:10px;background:#fffefa;overflow:hidden}
+.nr-item.is-failed{border-color:#eccdc3}
+.nr-head{display:flex;align-items:center;gap:8px;width:100%;border:0;background:transparent;padding:9px 11px;text-align:left;font-size:11px;cursor:pointer}
+.nr-head:hover{background:#f7f4ed}
+.nr-idx{font-size:9px;color:#a3a4a2;width:16px;text-align:right;flex-shrink:0}
+.nr-head strong{flex:1;font-weight:600;color:#333a42;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nr-head small{font-size:9px;color:#a0a2a4;flex-shrink:0}
+.nr-head .nr-model{color:#8a6b3c}
+.nr-detail{padding:0 11px 11px;display:flex;flex-direction:column;gap:6px}
+.nr-detail .form-label{margin-top:4px}
+.nr-text{font-family:ui-monospace,Menlo,monospace;font-size:10px;max-height:240px}
+.nr-detail .inline-msg{margin:0}
+
+/* ---- 断点续跑 ---- */
+.resume-run{display:flex;align-items:center;gap:10px}
+.resume-run small{font-size:10px;color:#a0a2a4;line-height:1.5;max-width:200px}
+
+/* ---- 结构化状态库 ---- */
+.wb-extract-btn{justify-content:center}
+.wb-extract-msg{color:#80a78a;font-size:10px}
+.mem-tabs{margin-bottom:12px}
+.state-panel{display:flex;flex-direction:column;gap:12px;max-height:60vh;overflow-y:auto;padding-right:4px}
+.state-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.state-panel-head small{font-size:10px;color:#a0a2a4;line-height:1.6}
+.state-group{display:flex;flex-direction:column;gap:6px}
+.state-group-head{font-size:10px;font-weight:700;letter-spacing:.6px;color:#8f938f;padding-top:4px}
+.state-item{border:1px solid #ece9e2;background:#fffefa;border-radius:10px;padding:9px 12px}
+.state-item-head{display:flex;align-items:center;gap:8px}
+.state-item-head strong{font-size:12px;color:#333a42}
+.state-source{font-size:9px;color:#a0a2a4}
+.state-badge{flex-shrink:0;font-size:9px;padding:2px 7px;border-radius:5px}
+.state-badge.is-confirmed{background:#eaf4ec;color:#4a8f5d}
+.state-badge.is-inferred{background:#fdf3e3;color:#b07d2a}
+.state-badge.neutral{background:#f0ede5;color:#8d8f8a}
+.state-badge.rel-new{background:#eaf4ec;color:#4a8f5d}
+.state-badge.rel-update{background:#e8eef6;color:#4a6f9e}
+.state-badge.rel-conflict{background:#fdeaea;color:#c0392b}
+.state-data{margin:6px 0 0;font-size:11px;color:#5d646d;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.state-conflict{margin:6px 0 0;font-size:10px;color:#c0392b;line-height:1.6}
+.state-item .icon-button.tiny{width:24px;height:24px}
+
+/* ---- 章节记忆提取 ---- */
+.extract-list{display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto;padding-right:4px}
+.extract-item{display:flex;gap:10px;border:1px solid #ece9e2;background:#fffefa;border-radius:10px;padding:10px 12px;cursor:pointer;text-align:left}
+.extract-item.rel-conflict{border-color:#eccdc3}
+.extract-item input{accent-color:var(--coral);margin-top:3px;flex-shrink:0}
+.extract-item-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+.extract-item-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.extract-item-head strong{font-size:12px;color:#333a42}
+.extract-data{font-size:10px;max-height:140px;margin:0}
+.extract-data.is-existing{background:#f5f2ea;color:#8d8f8a}
+
+/* ---- 滚动穿透统一收口：嵌套滚动区域滚到底后不把滚动链式传给外层 ---- */
+.modal,.run-list,.run-output,.mem-list,.state-panel,.extract-list,.ai-panel,.ai-body,.ai-output,.chv-diff,.wb-progress,.wf-timeline,.wf-event-preview,.prop-diff-text,.nr-item,.nr-text,.proj-list,.agents-scroll,.agent-pick,.agent-pick-list,.editor-preview,.editor-col,.group-bar,.chapter-tabs,.wf-combo-list,.wf-combo-groups,.wf-dim-list,.wf-node-ctx{overscroll-behavior:contain}
+
+/* ---- 连线选中高亮 ---- */
+.react-flow__edge .react-flow__edge-path{transition:stroke-width .12s ease}
+.react-flow__edge.selected .react-flow__edge-path{stroke-width:3.5px !important;filter:drop-shadow(0 0 3px rgba(185,78,65,.45))}
+.react-flow__edge.selected .wf-edge-label{border-color:#b94e41;color:#b94e41;font-weight:600;box-shadow:0 2px 8px #b94e4130}
+
+/* ---- 工作台项目统计 ---- */
+.wb-proj-stats{display:flex;gap:12px;margin-top:6px;color:#9a9ea4;font-size:11px}
+.wb-proj-stats span{display:inline-flex;align-items:center}
+.wb-proj-stats span+span:before{content:"·";margin-right:12px;color:#d4d0c6}
+
+
+/* ---- 章节列与工具条字数 ---- */
+.editor-toolbar-words{color:#9a9ea4;font-weight:400}

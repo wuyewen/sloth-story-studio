@@ -32,6 +32,11 @@ export default function SettingsWindow() {
     if (dir) await patchSettings({ workflowDir: dir });
   }
 
+  async function pickStyleDir() {
+    const dir = await sloth!.settings.pickDirectory();
+    if (dir) await patchSettings({ styleDir: dir });
+  }
+
   async function pickBg() {
     const img = await sloth!.settings.pickBackgroundImage();
     if (img) await patchSettings({ backgroundImage: img });
@@ -104,6 +109,30 @@ export default function SettingsWindow() {
               </button>
               {settings.workflowDir && (
                 <button className="ghost-button danger-text" onClick={() => patchSettings({ workflowDir: "" })}>
+                  <Trash2 size={14} /> 恢复默认
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="setting-block">
+            <div className="setting-copy">
+              <strong>风格模板目录</strong>
+              <small>风格模板（styles.json，含版本历史）保存位置；切换时自动迁移现有内容。留空为默认应用数据目录。</small>
+            </div>
+            <div className="setting-ctl">
+              <input
+                className="text-input"
+                readOnly
+                value={settings.styleDir}
+                placeholder="默认（应用数据目录）"
+                title={settings.styleDir || "默认（应用数据目录）"}
+              />
+              <button className="ghost-button" onClick={pickStyleDir}>
+                <FolderOpen size={14} /> 选择目录
+              </button>
+              {settings.styleDir && (
+                <button className="ghost-button danger-text" onClick={() => patchSettings({ styleDir: "" })}>
                   <Trash2 size={14} /> 恢复默认
                 </button>
               )}

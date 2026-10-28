@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FilePlus2, FileText, FolderPlus, Pencil, Plus, Trash2 } from "lucide-react";
+import { FilePlus2, FileText, FolderPlus, History, Pencil, Plus, Trash2 } from "lucide-react";
 import { sloth } from "../../api";
 import { useStudio } from "../../state/store";
 import { ConfirmDialog, Modal } from "../components/Modal";
 import AiPanel, { type InsertMode } from "./editor/AiPanel";
 import { Markdown } from "./editor/Markdown";
-import type { NovelProject } from "../../../shared/types";
+import type { ChapterVersion, NovelProject } from "../../../shared/types";
 
 function countWords(text: string) {
   return text.replace(/\s/g, "").length;
@@ -15,6 +15,102 @@ function fmtTime(ts: number) {
   const d = new Date(ts);
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
+
+// ---- 行级 LCS diff（自实现，无外部依赖）----
+
+type DiffOp = { type: "same" | "add" | "del"; text: string };
+type DiffLine = DiffOp | { type: "fold"; count: number };
+
+function lcsOps(a: string[], b: string[]): DiffOp[] {
+  const m = a.length;
+  const n = b.length;
+  const w = n + 1;
+  const dp = new Uint32Array((m + 1) * w);
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      dp[i * w + j] =
+        a[i] === b[j] ? dp[(i + 1) * w + j + 1] + 1 : Math.max(dp[(i + 1) * w + j], dp[i * w + j + 1]);
+    }
+  }
+  const ops: DiffOp[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) {
+      ops.push({ type: "same", text: a[i] });
+      i++;
+      j++;
+    } else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) {
+      ops.push({ type: "del", text: a[i] });
+      i++;
+    } else {
+      ops.push({ type: "add", text: b[j] });
+      j++;
+    }
+  }
+  while (i < m) ops.push({ type: "del", text: a[i++] });
+  while (j < n) ops.push({ type: "add", text: b[j++] });
+  return ops;
+}
+
+const DIFF_MAX_CELLS = 4_000_000; // 超出则不做对齐，避免大章节卡顿
+
+function lineDiff(oldText: string, newText: string): DiffLine[] {
+  const a = oldText.split("\n");
+  const b = newText.split("\n");
+  // 公共前缀/后缀裁剪
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const aMid = a.slice(pre, a.length - suf);
+  const bMid = b.slice(pre, b.length - suf);
+  const same = (text: string): DiffOp => ({ type: "same", text });
+  let midOps: DiffOp[];
+  if (aMid.length * bMid.length <= DIFF_MAX_CELLS) {
+    midOps = lcsOps(aMid, bMid);
+  } else {
+    midOps = [...aMid.map((t): DiffOp => ({ type: "del", text: t })), ...bMid.map((t): DiffOp => ({ type: "add", text: t }))];
+  }
+  const all: DiffOp[] = [...a.slice(0, pre).map(same), ...midOps, ...a.slice(a.length - suf).map(same)];
+  // 折叠：相同行只保留变更附近 3 行上下文
+  const out: DiffLine[] = [];
+  let i = 0;
+  while (i < all.length) {
+    if (all[i].type !== "same") {
+      out.push(all[i]);
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < all.length && all[j].type === "same") j++;
+    const len = j - i;
+    const isEdge = i === 0 || j === all.length;
+    const keep = isEdge ? 3 : 6; // 段首/段尾 3 行，中间段前后各 3 行
+    if (len <= keep + 1) {
+      for (let k = i; k < j; k++) out.push(all[k]);
+    } else if (i === 0) {
+      out.push({ type: "fold", count: len - 3 });
+      for (let k = j - 3; k < j; k++) out.push(all[k]);
+    } else if (j === all.length) {
+      for (let k = i; k < i + 3; k++) out.push(all[k]);
+      out.push({ type: "fold", count: len - 3 });
+    } else {
+      for (let k = i; k < i + 3; k++) out.push(all[k]);
+      out.push({ type: "fold", count: len - 6 });
+      for (let k = j - 3; k < j; k++) out.push(all[k]);
+    }
+    i = j;
+  }
+  return out;
+}
+
+const SOURCE_LABEL: Record<string, string> = {
+  manual: "手动",
+  workflow: "工作流",
+  rollback: "回滚",
+  unknown: "未知"
+};
 
 export default function EditorPage({ query }: { query: string }) {
   const projects = useStudio((s) => s.projects);
@@ -75,6 +171,64 @@ export default function EditorPage({ query }: { query: string }) {
   const [deletingProject, setDeletingProject] = useState<NovelProject | null>(null);
   const [deletingChapter, setDeletingChapter] = useState<{ id: string; title: string } | null>(null);
 
+  // ---- 章节版本历史（FR-08）----
+  const [histOpen, setHistOpen] = useState(false);
+  const [histVersions, setHistVersions] = useState<ChapterVersion[]>([]);
+  const [histSel, setHistSel] = useState<number | null>(null); // ts；null = 当前
+  const [histContent, setHistContent] = useState("");
+  const [histTab, setHistTab] = useState<"content" | "diff">("content");
+  const [histMsg, setHistMsg] = useState("");
+  const [rollbackTarget, setRollbackTarget] = useState<number | null>(null);
+
+  async function openChapterHistory() {
+    if (!sloth || !activePid || !chapterId) return;
+    await flushRef.current(); // 先落盘，保证「当前」与磁盘一致
+    setHistVersions(await sloth.novels.chapterVersions(activePid, chapterId));
+    setHistSel(null);
+    setHistContent(contentRef.current);
+    setHistTab("content");
+    setHistMsg("");
+    setHistOpen(true);
+  }
+
+  async function selectVersion(ts: number | null) {
+    if (!sloth || !activePid || !chapterId) return;
+    setHistSel(ts);
+    setHistMsg("");
+    if (ts === null) {
+      setHistContent(contentRef.current);
+      return;
+    }
+    try {
+      setHistContent(await sloth.novels.chapterVersionRead(activePid, chapterId, ts));
+    } catch (err) {
+      setHistContent("");
+      setHistMsg(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  const diffLines = useMemo(
+    () => (histOpen && histTab === "diff" ? lineDiff(histContent, contentRef.current) : []),
+    [histOpen, histTab, histContent, content]
+  );
+
+  async function confirmRollback() {
+    if (!sloth || !activePid || !chapterId || rollbackTarget === null) return;
+    const ts = rollbackTarget;
+    setRollbackTarget(null);
+    await sloth.novels.chapterRollback(activePid, chapterId, ts);
+    const text = await sloth.novels.readChapter(activePid, chapterId);
+    setContent(text);
+    contentRef.current = text;
+    pendingRef.current = null;
+    setSaveState("saved");
+    setHistVersions(await sloth.novels.chapterVersions(activePid, chapterId));
+    setHistSel(null);
+    setHistContent(text);
+    setHistMsg("已回滚，原内容已自动存为新快照");
+    await refreshProjects();
+  }
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const timerRef = useRef<number | undefined>(undefined);
   const pendingRef = useRef<{ pid: string; cid: string; text: string } | null>(null);
@@ -109,7 +263,7 @@ export default function EditorPage({ query }: { query: string }) {
     pendingRef.current = null;
     setSaveState("saving");
     try {
-      await sloth.novels.writeChapter(p.pid, p.cid, p.text);
+      await sloth.novels.writeChapter(p.pid, p.cid, p.text, "manual");
       await refreshProjects();
       setSaveState("saved");
     } catch {
@@ -244,7 +398,7 @@ export default function EditorPage({ query }: { query: string }) {
         const updated = list.find((p) => p.id === activePid);
         const last = updated?.chapters[updated.chapters.length - 1];
         if (last) {
-          await sloth.novels.writeChapter(activePid, last.id, text);
+          await sloth.novels.writeChapter(activePid, last.id, text, "manual");
           await refreshProjects();
           setChapterId(last.id);
         }
@@ -320,6 +474,36 @@ export default function EditorPage({ query }: { query: string }) {
         </div>
       </div>
 
+      <div className="editor-col chapter-list-col">
+        <div className="col-head">
+          <span>{project ? `${project.units.find((u) => u.id === effectiveUnitSel)?.title ?? ""} · 章节` : "章节"}</span>
+          {project && (
+            <button className="icon-button" title="新建章节" onClick={addChapter}>
+              <FilePlus2 size={16} />
+            </button>
+          )}
+        </div>
+        <div className="proj-list">
+          {project && visibleChapters.map((c) => (
+            <div
+              key={c.id}
+              className={`proj-item ${c.id === chapterId ? "active" : ""}`}
+              onClick={() => selectChapter(c.id)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setCtxMenu({ x: e.clientX, y: e.clientY, kind: "chapter", id: c.id, title: c.title });
+              }}
+            >
+              <strong>{c.title}</strong>
+              <small>{c.words} 字</small>
+            </div>
+          ))}
+          {project && visibleChapters.length === 0 && (
+            <div className="unit-empty">本单元暂无章节</div>
+          )}
+        </div>
+      </div>
+
       <div className="editor-col chapter-col">
         {!project && (
           <div className="chapter-placeholder">
@@ -329,45 +513,6 @@ export default function EditorPage({ query }: { query: string }) {
         )}
         {project && (
           <>
-            <div className="chapter-bar">
-              <div className="chapter-tabs">
-                {visibleChapters.map((c) => (
-                  <div
-                    key={c.id}
-                    className="chapter-tab-row"
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setCtxMenu({ x: e.clientX, y: e.clientY, kind: "chapter", id: c.id, title: c.title });
-                    }}
-                  >
-                    <button
-                      className={`chapter-tab ${c.id === chapterId ? "active" : ""}`}
-                      onClick={() => selectChapter(c.id)}
-                      title={`${c.words} 字`}
-                    >
-                      {c.title}
-                      <small>{c.words} 字</small>
-                    </button>
-                  </div>
-                ))}
-                {visibleChapters.length === 0 && (
-                  <div className="unit-empty">本单元暂无章节</div>
-                )}
-              </div>
-              <button className="icon-button" title="新建章节" onClick={addChapter}>
-                <FilePlus2 size={16} />
-              </button>
-              {chapter && (
-                <button
-                  className="icon-button danger-text"
-                  title="删除章节"
-                  onClick={() => setDeletingChapter({ id: chapter.id, title: chapter.title })}
-                >
-                  <Trash2 size={15} />
-                </button>
-              )}
-            </div>
-
             {!chapter && (
               <div className="chapter-placeholder">
                 <p>选择或新建一个章节。</p>
@@ -377,7 +522,18 @@ export default function EditorPage({ query }: { query: string }) {
               <>
                 <div className="editor-toolbar">
                   <strong>{chapter.title}</strong>
+                  <small className="editor-toolbar-words">{countWords(content)} 字</small>
                   <span className="flex-spacer" />
+                  <button
+                    className="icon-button danger-text"
+                    title="删除章节"
+                    onClick={() => setDeletingChapter({ id: chapter.id, title: chapter.title })}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                  <button className="ghost-button small" onClick={() => void openChapterHistory()} title="版本历史：查看、对比、回滚">
+                    <History size={13} /> 历史
+                  </button>
                   <div className="segmented small">
                     <button className={view === "edit" ? "active" : ""} onClick={() => setView("edit")}>
                       编辑
@@ -401,7 +557,6 @@ export default function EditorPage({ query }: { query: string }) {
                   </div>
                 )}
                 <div className="editor-statusbar">
-                  <span>{countWords(content)} 字</span>
                   <span>{saveState === "saved" ? "已保存" : saveState === "saving" ? "保存中…" : "等待保存…"}</span>
                 </div>
               </>
@@ -582,6 +737,84 @@ export default function EditorPage({ query }: { query: string }) {
             <button className="primary-button" disabled={!chapterRenameTitle.trim()} onClick={() => void confirmRenameChapter()}>保存</button>
           </div>
         </Modal>
+      )}
+
+      {histOpen && chapter && activePid && (
+        <Modal title={`版本历史 · ${chapter.title}`} onClose={() => setHistOpen(false)} width={860}>
+          <div className="mem-layout">
+            <div className="mem-list">
+              <button
+                className={`mem-item ${histSel === null ? "active" : ""}`}
+                onClick={() => void selectVersion(null)}
+              >
+                <strong>当前（正在编辑）</strong>
+                <small>{countWords(contentRef.current)} 字</small>
+              </button>
+              {histVersions.map((v) => (
+                <button
+                  key={v.ts}
+                  className={`mem-item ${histSel === v.ts ? "active" : ""}`}
+                  onClick={() => void selectVersion(v.ts)}
+                >
+                  <strong>
+                    {new Date(v.ts).toLocaleString()}
+                    <span className={`chv-badge src-${v.source in SOURCE_LABEL ? v.source : "unknown"}`}>
+                      {SOURCE_LABEL[v.source] ?? v.source}
+                    </span>
+                  </strong>
+                  <small>{v.size} B</small>
+                </button>
+              ))}
+              {histVersions.length === 0 && <div className="wb-empty">还没有历史版本（每次内容变化并保存时自动留档，最多 30 份）。</div>}
+            </div>
+            <div className="mem-editor">
+              <div className="segmented small chv-tabs">
+                <button className={histTab === "content" ? "active" : ""} onClick={() => setHistTab("content")}>内容</button>
+                <button className={histTab === "diff" ? "active" : ""} onClick={() => setHistTab("diff")}>与当前对比</button>
+              </div>
+              {histTab === "content" ? (
+                <pre className="prop-diff-text mem-history-preview">{histContent || "（空）"}</pre>
+              ) : (
+                <div className="chv-diff prop-diff-text mem-history-preview">
+                  {histSel === null && <div className="wb-empty">当前版本与自身无差异，选择左侧历史版本进行对比。</div>}
+                  {histSel !== null && diffLines.length === 0 && <div className="wb-empty">两个版本内容完全一致。</div>}
+                  {histSel !== null &&
+                    diffLines.map((l, i) =>
+                      l.type === "fold" ? (
+                        <div key={i} className="chv-fold">… {l.count} 行未变 …</div>
+                      ) : (
+                        <div key={i} className={`chv-line is-${l.type}`}>
+                          {l.type === "add" ? "+ " : l.type === "del" ? "- " : "  "}
+                          {l.text}
+                        </div>
+                      )
+                    )}
+                </div>
+              )}
+              {histMsg && <span className="inline-msg ok">{histMsg}</span>}
+              <div className="mem-actions">
+                <span className="flex-spacer" />
+                <button
+                  className="primary-button"
+                  disabled={histSel === null}
+                  title={histSel === null ? "当前版本不可回滚自身" : "把该版本内容写回正文（当前内容会先自动存为新快照）"}
+                  onClick={() => histSel !== null && setRollbackTarget(histSel)}
+                >
+                  回滚到此版本
+                </button>
+              </div>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {rollbackTarget !== null && chapter && (
+        <ConfirmDialog
+          title="回滚章节"
+          message={`确定把「${chapter.title}」回滚到 ${new Date(rollbackTarget).toLocaleString()} 的版本吗？当前内容会先自动存为新快照，可随时再回滚回来。`}
+          onCancel={() => setRollbackTarget(null)}
+          onConfirm={() => void confirmRollback()}
+        />
       )}
     </div>
   );

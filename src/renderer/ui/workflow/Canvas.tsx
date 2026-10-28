@@ -13,20 +13,23 @@ import {
   type ReactFlowInstance
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { ArrowLeft, Loader2, Network, Play, Save, Sparkles, Square, Trash2 } from "lucide-react";
+import { ArrowLeft, Loader2, Network, Play, Save, Sparkles, Square, Trash2, Wallet } from "lucide-react";
 import { sloth } from "../../api";
 import { useStudio } from "../../state/store";
 import { Modal } from "../components/Modal";
 import { nodeTypes, type WfNode } from "./nodes";
 import { edgeTypes } from "./edges";
+import ConditionEditor from "./ConditionEditor";
 import { EDGE_COLORS, LINE_OPTIONS, lineToRfType } from "./edgeUtils";
 import type {
+  WorkflowBudget,
   WorkflowDef,
   WorkflowEdgeLine,
   WorkflowInput,
   WorkflowNodeKind,
   WorkflowRunEvent
 } from "../../../shared/types";
+import { CONTEXT_DEFAULT_SOURCES, REVIEW_DIMENSIONS } from "../../../shared/types";
 
 type WfEdge = Edge<{ line?: WorkflowEdgeLine; color?: string; conditionExpr?: string }>;
 
@@ -35,12 +38,27 @@ type NodeStatus = "running" | "done" | "error";
 const ADDABLE: { kind: WorkflowNodeKind; label: string }[] = [
   { kind: "agent", label: "Agent" },
   { kind: "prompt", label: "Prompt" },
+  { kind: "context", label: "上下文构建" },
+  { kind: "review", label: "结构化审核" },
+  { kind: "patch", label: "局部修订" },
   { kind: "note", label: "备注" }
 ];
 
 function defaultData(kind: WorkflowNodeKind) {
   if (kind === "agent") return { kind, label: "Agent", agentId: null };
   if (kind === "prompt") return { kind, label: "Prompt", template: "{{input}}" };
+  if (kind === "context")
+    return {
+      kind,
+      label: "上下文构建",
+      contextSources: [...CONTEXT_DEFAULT_SOURCES],
+      contextMaxChars: 12000,
+      contextRecentChapters: 1,
+      contextChapterChars: 3000,
+      contextMemoryFiles: ""
+    };
+  if (kind === "review") return { kind, label: "结构化审核", dimensions: [...REVIEW_DIMENSIONS] };
+  if (kind === "patch") return { kind, label: "局部修订", textSource: "", reviewSource: "" };
   return { kind, label: "备注" };
 }
 
@@ -58,6 +76,9 @@ export default function Canvas({
   const [name, setName] = useState(workflow.name);
   const [description, setDescription] = useState(workflow.description);
   const [wfProviderId, setWfProviderId] = useState(workflow.providerId ?? "");
+  const [budget, setBudget] = useState<WorkflowBudget>(workflow.budget ?? {});
+  const [budgetOpen, setBudgetOpen] = useState(false);
+  const [budgetForm, setBudgetForm] = useState({ maxCalls: "", maxTokens: "", callTimeoutSec: "" });
   const [nodes, setNodes, onNodesChange] = useNodesState<WfNode>(
     workflow.nodes.map((n) => ({
       ...n,
@@ -138,6 +159,7 @@ export default function Canvas({
       name: name.trim() || "未命名工作流",
       description,
       providerId: wfProviderId || null,
+      ...(budget.maxCalls || budget.maxTokens || budget.callTimeoutSec ? { budget } : {}),
       nodes: nodes.map((n) => ({ id: n.id, type: n.type ?? "agent", position: n.position, data: n.data })),
       edges: edges.map((e) => ({
         id: e.id,
@@ -154,7 +176,7 @@ export default function Canvas({
     await sloth.workflows.save(input);
     await refreshWorkflows();
     setSaveState("saved");
-  }, [workflow.id, name, description, wfProviderId, nodes, edges, refreshWorkflows, readOnly]);
+  }, [workflow.id, name, description, wfProviderId, budget, nodes, edges, refreshWorkflows, readOnly]);
 
   const saveRef = useRef(save);
   saveRef.current = save;
@@ -168,7 +190,7 @@ export default function Canvas({
     setSaveState("dirty");
     const t = window.setTimeout(() => void saveRef.current(), 1500);
     return () => window.clearTimeout(t);
-  }, [nodes, edges, name, description, wfProviderId]);
+  }, [nodes, edges, name, description, wfProviderId, budget]);
 
   const onConnect = useCallback(
     (conn: Connection) =>
@@ -489,6 +511,37 @@ export default function Canvas({
             <button className="ghost-button small" onClick={() => setOptOpen(true)} title="用一句话描述需求，让 AI 调整当前工作流">
               <Sparkles size={14} /> 优化
             </button>
+            <button
+              className="ghost-button small"
+              onClick={() => {
+                setBudgetForm({
+                  maxCalls: budget.maxCalls ? String(budget.maxCalls) : "",
+                  maxTokens: budget.maxTokens ? String(budget.maxTokens) : "",
+                  callTimeoutSec: budget.callTimeoutSec ? String(budget.callTimeoutSec) : ""
+                });
+                setBudgetOpen(true);
+              }}
+              title={
+                budget.maxCalls || budget.maxTokens || budget.callTimeoutSec
+                  ? `预算：${[
+                      budget.maxCalls ? `≤${budget.maxCalls} 次` : "",
+                      budget.maxTokens ? `≤${budget.maxTokens} tok` : "",
+                      budget.callTimeoutSec ? `${budget.callTimeoutSec}s/次` : ""
+                    ].filter(Boolean).join(" / ")}`
+                  : "设置本次运行的模型调用预算（默认不限）"
+              }
+            >
+              <Wallet size={14} /> 预算
+              {(budget.maxCalls || budget.maxTokens || budget.callTimeoutSec) && (
+                <span className="wf-budget-tag">
+                  {[
+                    budget.maxCalls ? `≤${budget.maxCalls}次` : "",
+                    budget.maxTokens ? `≤${budget.maxTokens}tok` : "",
+                    budget.callTimeoutSec ? `${budget.callTimeoutSec}s` : ""
+                  ].filter(Boolean).join("/")}
+                </span>
+              )}
+            </button>
             <button className="ghost-button small" onClick={() => void saveRef.current()}>
               <Save size={14} /> 保存
             </button>
@@ -583,16 +636,15 @@ export default function Canvas({
                 placeholder="边标签"
               />
             </label>
-            <label className="form-row">
-              <span className="form-label">条件表达式</span>
-              <textarea
-                className="text-input"
-                rows={3}
-                value={selectedEdge.data?.conditionExpr ?? ""}
-                onChange={(e) => patchEdge(selectedEdge.id, { conditionExpr: e.target.value })}
-                placeholder="output.includes('通过')"
+            <div className="form-row">
+              <span className="form-label">条件</span>
+              <ConditionEditor
+                key={selectedEdge.id}
+                expr={selectedEdge.data?.conditionExpr ?? ""}
+                nodeLabels={[...new Set(nodes.map((n) => n.data.label).filter((l) => l && l.trim()))]}
+                onChange={(expr) => patchEdge(selectedEdge.id, { conditionExpr: expr })}
               />
-            </label>
+            </div>
           </div>
         )}
       </div>
@@ -635,8 +687,66 @@ export default function Canvas({
         </Modal>
       )}
 
-      {runOpen && (        <Modal title="运行测试" onClose={() => setRunOpen(false)} width={520}>
+      {budgetOpen && (
+        <Modal title="运行预算" onClose={() => setBudgetOpen(false)} width={420}>
+          <p className="prop-reason">限制本工作流单次运行的模型调用成本；留空或填 0 表示不限。超限后流程安全停止，可从运行记录「从断点继续」。</p>
           <label className="form-row">
+            <span className="form-label">最大模型调用次数</span>
+            <input
+              className="text-input"
+              type="number"
+              min={0}
+              value={budgetForm.maxCalls}
+              onChange={(e) => setBudgetForm({ ...budgetForm, maxCalls: e.target.value })}
+              placeholder="不限"
+            />
+          </label>
+          <label className="form-row">
+            <span className="form-label">最大 token 数</span>
+            <input
+              className="text-input"
+              type="number"
+              min={0}
+              value={budgetForm.maxTokens}
+              onChange={(e) => setBudgetForm({ ...budgetForm, maxTokens: e.target.value })}
+              placeholder="不限"
+            />
+          </label>
+          <label className="form-row">
+            <span className="form-label">单次调用超时（秒）</span>
+            <input
+              className="text-input"
+              type="number"
+              min={0}
+              value={budgetForm.callTimeoutSec}
+              onChange={(e) => setBudgetForm({ ...budgetForm, callTimeoutSec: e.target.value })}
+              placeholder="不限"
+            />
+          </label>
+          <div className="modal-actions">
+            <button className="ghost-button" onClick={() => setBudgetOpen(false)}>取消</button>
+            <button
+              className="primary-button"
+              onClick={() => {
+                const num = (s: string): number | undefined => {
+                  const n = Number(s);
+                  return s.trim() && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+                };
+                setBudget({
+                  maxCalls: num(budgetForm.maxCalls),
+                  maxTokens: num(budgetForm.maxTokens),
+                  callTimeoutSec: num(budgetForm.callTimeoutSec)
+                });
+                setBudgetOpen(false);
+              }}
+            >
+              保存
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {runOpen && (        <Modal title="运行测试" onClose={() => setRunOpen(false)} width={520}>          <label className="form-row">
             <span className="form-label">输入</span>
             <textarea
               className="text-input"

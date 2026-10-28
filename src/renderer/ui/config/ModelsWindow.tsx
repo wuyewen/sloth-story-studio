@@ -12,6 +12,7 @@ interface FormState {
   model: string;
   displayName: string;
   enableThinking: boolean;
+  sendTemperature: boolean;
   contextLength: string;
   enabled: boolean;
 }
@@ -23,6 +24,7 @@ const blank: FormState = {
   model: "",
   displayName: "",
   enableThinking: false,
+  sendTemperature: true,
   contextLength: "",
   enabled: true
 };
@@ -35,6 +37,7 @@ function fromProvider(p: ModelProviderInfo): FormState {
     model: p.model,
     displayName: p.displayName,
     enableThinking: p.enableThinking,
+    sendTemperature: p.sendTemperature !== false,
     contextLength: p.contextLength == null ? "" : String(p.contextLength),
     enabled: p.enabled
   };
@@ -105,6 +108,7 @@ export default function ModelsWindow() {
         model: form.model.trim(),
         displayName: form.displayName.trim(),
         enableThinking: form.enableThinking,
+        sendTemperature: form.sendTemperature,
         contextLength,
         enabled: form.enabled
       });
@@ -147,6 +151,7 @@ export default function ModelsWindow() {
         model: form.model.trim(),
         displayName: form.displayName.trim() || form.model.trim(),
         enableThinking: form.enableThinking,
+        sendTemperature: form.sendTemperature,
         contextLength,
         enabled: form.enabled
       });
@@ -253,6 +258,10 @@ export default function ModelsWindow() {
                   <label className="check-item">
                     <input type="checkbox" checked={form.enableThinking} onChange={(e) => patch({ enableThinking: e.target.checked })} />
                     启用思考模式
+                  </label>
+                  <label className="check-item" title="某些套餐模型只接受默认温度（如 Kimi 订阅），关闭则不发送 temperature 参数">
+                    <input type="checkbox" checked={form.sendTemperature} onChange={(e) => patch({ sendTemperature: e.target.checked })} />
+                    自定义温度
                   </label>
                   <label className="check-item">
                     <input type="checkbox" checked={form.enabled} onChange={(e) => patch({ enabled: e.target.checked })} />

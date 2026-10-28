@@ -32,8 +32,8 @@ const PACKS: StylePack[] = [
     name: "玄幻·搞笑·反诈（单元流）",
     desc: "每个小世界一种骗局，写手+审核+玄幻/搞笑/反诈三读者并行评审",
     agents: [
-      { name: "玄幻反诈写手", role: "按单元大纲写玄幻搞笑反诈风格的章节正文", systemPrompt: "你是一位擅长玄幻+搞笑+反诈题材的小说写手。根据给定的大纲与记忆创作章节正文：世界观自洽、笑点自然、骗局逻辑真实可识别。【硬性要求】只输出正文，不输出任何解释、修改说明或元信息。", temperature: 0.8, color: "#C85B4E" },
-      { name: "反诈审稿编辑", role: "审查章节逻辑、设定一致性与骗局呈现", systemPrompt: "你是严谨的小说审稿编辑。审查章节正文的逻辑漏洞、设定一致性、文风问题，以及骗局的可识别性与警示价值。结尾必须单独一行输出结论标记：CHAPTER_RESULT: PASS（通过）或 CHAPTER_RESULT: REVISE（需返修）。", temperature: 0.3, color: "#5B7EC8" }
+      { name: "玄幻反诈写手", role: "按单元大纲写反诈题材的章节正文", systemPrompt: "你是一位擅长反诈题材单元故事的小说写手。根据给定的大纲与记忆创作章节正文：情节服务于骗局设计，骗局逻辑真实可识别、有警示价值。文风以本书绑定的风格模板为准（随上下文给出）。【硬性要求】只输出正文，不输出任何解释、修改说明或元信息。", temperature: 0.8, color: "#C85B4E" },
+      { name: "反诈审稿编辑", role: "审查章节逻辑、设定一致性与骗局呈现", systemPrompt: "你是严谨的小说审稿编辑。审查章节正文的逻辑漏洞、设定一致性、文风问题（以本书绑定的风格模板为准），以及骗局的可识别性与警示价值。结尾必须单独一行输出结论标记：CHAPTER_RESULT: PASS（通过）或 CHAPTER_RESULT: REVISE（需返修）。", temperature: 0.3, color: "#5B7EC8" }
     ],
     workflowDesc: "单元流章节生产：写手初稿 → 反诈审稿编辑审查 → 需返修回写手（最多3轮）→ 终稿",
     writerAgent: "玄幻反诈写手",
@@ -45,8 +45,8 @@ const PACKS: StylePack[] = [
     name: "通用长篇（单线架构）",
     desc: "一条主线走到底：写手+编辑双人组，适合不拆单元的长篇",
     agents: [
-      { name: "长篇写手", role: "按大纲写长篇小说章节正文", systemPrompt: "你是长篇小说写手。根据任务与记忆写作章节正文，保持人物、文风、主线一致。【硬性要求】只输出正文，不输出解释或元信息。", temperature: 0.8, color: "#80A78A" },
-      { name: "长篇编辑", role: "审查章节逻辑与文风一致性", systemPrompt: "你是长篇小说的责任编辑。审查章节的逻辑、人物一致性、文风统一性。结尾必须单独一行输出结论标记：CHAPTER_RESULT: PASS（通过）或 CHAPTER_RESULT: REVISE（需返修）。", temperature: 0.3, color: "#7D8796" }
+      { name: "长篇写手", role: "按大纲写长篇小说章节正文", systemPrompt: "你是长篇小说写手。根据任务与记忆写作章节正文，保持人物与主线一致；文风以本书绑定的风格模板为准（随上下文给出）。【硬性要求】只输出正文，不输出解释或元信息。", temperature: 0.8, color: "#80A78A" },
+      { name: "长篇编辑", role: "审查章节逻辑与文风一致性", systemPrompt: "你是长篇小说的责任编辑。审查章节的逻辑、人物一致性、文风统一性（以本书绑定的风格模板为准）。结尾必须单独一行输出结论标记：CHAPTER_RESULT: PASS（通过）或 CHAPTER_RESULT: REVISE（需返修）。", temperature: 0.3, color: "#7D8796" }
     ],
     workflowDesc: "长篇单线：写手初稿 → 编辑审查 → 需返修回写手（最多3轮）→ 终稿",
     writerAgent: "长篇写手",
@@ -58,7 +58,7 @@ const PACKS: StylePack[] = [
 function buildPackWorkflow(pack: StylePack): { nodes: WorkflowNode[]; edges: WorkflowEdge[] } {
   const nodes: WorkflowNode[] = [
     { id: "start", type: "start", position: { x: 60, y: 80 }, data: { kind: "start", label: "开始" } },
-    { id: "ctx", type: "prompt", position: { x: 340, y: 80 }, data: { kind: "prompt", label: "章节任务与记忆", template: "# 本章写作任务\n{{input}}\n\n【全书规划】\n{{memory.全书规划}}\n\n【单元规划】\n{{memory.unit-plan}}" } },
+    { id: "ctx", type: "prompt", position: { x: 340, y: 80 }, data: { kind: "prompt", label: "章节任务与记忆", template: "# 本章写作任务\n{{input}}\n\n【本书风格】\n{{style.full}}\n\n【全书规划】\n{{memory.全书规划}}\n\n【单元规划】\n{{memory.unit-plan}}" } },
     { id: "draft", type: "agent", position: { x: 620, y: 80 }, data: { kind: "agent", label: "写作初稿", agentId: null, contextTemplate: "写作任务与记忆：\n{{nodes.ctx.output}}\n\n请完成本章初稿（完整正文，只输出正文）。" } },
     { id: "edit", type: "agent", position: { x: 900, y: 80 }, data: { kind: "agent", label: "编辑审查", agentId: null, contextTemplate: "写作任务：\n{{nodes.ctx.output}}\n\n章节稿件：\n{{nodes.draft.output}}\n\n返修稿（首轮为空，非空则以它为准）：\n{{nodes.revise.output}}\n\n请审查当前稿件；结尾必须单独一行输出结论标记：CHAPTER_RESULT: PASS 或 CHAPTER_RESULT: REVISE。" } },
     { id: "revise", type: "agent", position: { x: 1180, y: 80 }, data: { kind: "agent", label: "写手返修", agentId: null, maxVisits: 3, contextTemplate: "写作任务：\n{{nodes.ctx.output}}\n\n上一版稿件：\n{{nodes.draft.output}}\n\n编辑意见：\n{{nodes.edit.output}}\n\n请根据意见返修，输出完整修订稿（只输出正文）。" } },
@@ -145,7 +145,7 @@ export default function CustomFlowModal({ projectId, projectTitle, onClose }: Pr
     const agentRes = await sloth!.llm.chat({
       providerId: effProvider,
       messages: [
-        { role: "system", content: "你是 Agent 设计助手。只输出 JSON 数组，不要围栏不要解释。每项：{\"name\":\"...\",\"role\":\"一句话职责\",\"systemPrompt\":\"中文系统提示词\",\"temperature\":0.7,\"color\":\"#C85B4E\"}" },
+        { role: "system", content: "你是 Agent 设计助手。只输出 JSON 数组，不要围栏不要解释。每项：{\"name\":\"...\",\"role\":\"一句话职责\",\"systemPrompt\":\"中文系统提示词（只定义职责与专业要求；文风规则不要写死，结尾加一句：文风以本书绑定的风格模板为准）\",\"temperature\":0.7,\"color\":\"#C85B4E\"}" },
         { role: "user", content: `为以下小说创作风格设计 2-3 个协作 Agent（如写手/审核/读者）：\n${desc.trim()}` }
       ]
     });
@@ -155,7 +155,7 @@ export default function CustomFlowModal({ projectId, projectTitle, onClose }: Pr
     for (const d of defs) nameToId.set(d.name, await ensureAgent(d));
 
     const { nodes, edges } = await sloth!.workflows.generate(
-      `为以下风格创建小说章节创作工作流（写作→审核→返修循环→终稿），Agent 节点使用这些名称：${[...nameToId.keys()].join("、")}。风格：${desc.trim()}`,
+      `为以下风格创建小说章节创作工作流（写作→审核→返修循环→终稿），Agent 节点使用这些名称：${[...nameToId.keys()].join("、")}。风格：${desc.trim()}。注意：写作类节点的上下文模板需包含【本书风格】{{style.full}} 引用（项目绑定风格模板后自动生效），不要把文风规则写死进节点模板。`,
       effProvider
     );
     for (const n of nodes) {
