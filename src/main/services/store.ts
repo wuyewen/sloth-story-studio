@@ -418,7 +418,8 @@ function wf03(byName: (name: string) => string | null, now: number): WorkflowDef
         "写作任务：\n{{nodes.ctx.output}}\n\n上一版稿件：\n{{nodes.draft.output}}\n\n编辑意见：\n{{nodes.edit.output}}\n\n读者意见：\n{{nodes.reader.output}}\n\n请根据意见返修，输出完整修订稿（只输出正文）。",
         3
       ),
-      END
+      // F-03：end 输出固定取最新正文（返修稿优先，其次初稿），而不是 pass 路径上游的评审文本
+      { id: "end", type: "end", position: { x: 1760, y: 80 }, data: { kind: "end", label: "结束", outputSource: "写手返修, 写作初稿" } }
     ],
     edges: [
       mkEdge("e1", "start", "ctx"),

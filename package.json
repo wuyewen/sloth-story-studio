@@ -1,6 +1,6 @@
 {
   "name": "sloth-story-studio",
-  "version": "0.1.0",
+  "version": "1.0.5",
   "private": true,
   "description": "Local-first AI novel-writing desktop studio",
   "main": "dist/main/index.js",

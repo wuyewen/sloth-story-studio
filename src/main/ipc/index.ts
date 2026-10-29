@@ -1,4 +1,4 @@
-import { dialog, ipcMain, webContents, type IpcMainInvokeEvent } from "electron";
+import { app, dialog, ipcMain, webContents, type IpcMainInvokeEvent } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import type {
@@ -33,8 +33,9 @@ import {
   writeWorkflows,
   type ModelRecord
 } from "../services/store.js";
-import { decryptKey, encryptKey } from "../services/crypto.js";
+import { decryptKey, encryptKey, isEncryptionAvailable } from "../services/crypto.js";
 import { abortStream, chat, chatStream } from "../services/llmClient.js";
+import { isSafeCondition } from "../services/condExpr.js";
 import * as novelFs from "../services/novelFs.js";
 import * as novelState from "../services/novelState.js";
 import * as proposals from "../services/proposals.js";
@@ -68,6 +69,9 @@ export function registerIpc(): void {
   ipcMain.handle("app:openConfig", (_e, kind: "models" | "settings") => {
     openConfigWindow(kind);
   });
+
+  ipcMain.handle("app:encryptionAvailable", () => isEncryptionAvailable());
+  ipcMain.handle("app:version", () => app.getVersion());
 
   // ---- models ----
 
@@ -581,6 +585,14 @@ ${content}`;
   ipcMain.handle("workflows:save", (_e, input: WorkflowInput) => {
     const workflows = readWorkflows();
     const now = Date.now();
+    // F-01：保存前校验边条件能被白名单求值器解析，不能解析的清空条件并告警
+    for (const edge of input.edges) {
+      const expr = edge.data?.conditionExpr;
+      if (expr && !isSafeCondition(expr)) {
+        console.warn(`[ipc] 工作流「${input.name}」存在不被安全求值器支持的边条件，已清空: ${expr.slice(0, 120)}`);
+        if (edge.data) delete edge.data.conditionExpr;
+      }
+    }
     if (input.id) {
       const idx = workflows.findIndex((w) => w.id === input.id);
       if (idx < 0) throw new Error("工作流不存在");
@@ -630,21 +642,31 @@ ${content}`;
     ): Promise<{ finalOutput?: string; error?: string; proposalsCreated?: number }> => {
       const workflow = readWorkflows().find((w) => w.id === workflowId);
       if (!workflow) throw new Error("工作流不存在");
-      // 断点续跑：从上次运行的记录中取出已成功节点的输出构建重放表；找不到记录或没有可重放节点则按普通运行
+      // 断点续跑：从上次运行的记录中取出已成功节点的输出构建重放表；找不到记录则按普通运行
       let replayOutputs: Record<string, string> | undefined;
       let effectiveInput = input;
       if (resumeFromRunId && projectId) {
         const prev = novelFs.runHistory(projectId).find((r) => r.runId === resumeFromRunId);
-        if (prev?.nodeRuns) {
-          const table: Record<string, string> = {};
-          for (const nr of prev.nodeRuns) {
-            if (nr.status === "succeeded" && typeof nr.output === "string") {
-              table[`${nr.nodeId}#${nr.attempt}`] = nr.output;
-            }
+        if (prev) {
+          // F-05：续跑绑定工作流版本——id 与定义哈希都必须一致，否则拒绝重放
+          if (
+            prev.workflowId !== workflow.id ||
+            !prev.workflowHash ||
+            prev.workflowHash !== workflowEngine.computeWorkflowHash(workflow)
+          ) {
+            throw new Error("工作流已修改，无法从断点继续，请重新开始运行");
           }
-          if (Object.keys(table).length > 0) {
-            replayOutputs = table;
-            if (typeof prev.input === "string") effectiveInput = prev.input;
+          if (prev.nodeRuns) {
+            const table: Record<string, string> = {};
+            for (const nr of prev.nodeRuns) {
+              if (nr.status === "succeeded" && typeof nr.output === "string") {
+                table[`${nr.nodeId}#${nr.attempt}`] = nr.output;
+              }
+            }
+            if (Object.keys(table).length > 0) {
+              replayOutputs = table;
+              if (typeof prev.input === "string") effectiveInput = prev.input;
+            }
           }
         }
       }

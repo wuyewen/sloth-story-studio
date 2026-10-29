@@ -1,4 +1,5 @@
 import type { WebContents } from "electron";
+import crypto from "node:crypto";
 import type {
   AgentProfile,
   AgentRunEvent,
@@ -14,6 +15,7 @@ import type {
 import { CONTEXT_DEFAULT_SOURCES, CONTEXT_SOURCES, REVIEW_DIMENSIONS } from "../../shared/types.js";
 import { chat } from "./llmClient.js";
 import type { ChatUsage } from "./llmClient.js";
+import { evalConditionExpr, isSafeCondition } from "./condExpr.js";
 import * as novelFs from "./novelFs.js";
 import * as proposals from "./proposals.js";
 import * as styleStore from "./styleStore.js";
@@ -21,6 +23,12 @@ import * as styleStore from "./styleStore.js";
 export type GetKey = (providerId: string) => string;
 
 const MAX_STEPS = 50;
+
+// F-05：工作流定义哈希（{nodes, edges} 稳定序列化的 sha256），断点续跑时校验工作流未被修改
+export function computeWorkflowHash(workflow: WorkflowDef): string {
+  const stable = JSON.stringify({ nodes: workflow.nodes, edges: workflow.edges });
+  return crypto.createHash("sha256").update(stable, "utf-8").digest("hex");
+}
 
 const running = new Map<string, { stopped: boolean; controller: AbortController | null }>();
 
@@ -38,14 +46,14 @@ function sendEvent(webContents: WebContents, ev: WorkflowRunEvent): void {
   }
 }
 
+// 条件表达式走白名单安全求值器（F-01）：不支持的形态拒绝执行（返回 false 并告警）
 function evalCondition(expr: string, output: string, context: Record<string, unknown>): boolean {
   try {
-    const fn = new Function("output", "context", `return (${expr});`) as (
-      o: string,
-      c: Record<string, unknown>
-    ) => unknown;
-    return Boolean(fn(output, context));
-  } catch {
+    return evalConditionExpr(expr, output, context);
+  } catch (err) {
+    console.warn(
+      `[workflowEngine] 条件表达式被安全求值器拒绝，按不通过处理: ${expr.slice(0, 120)} — ${err instanceof Error ? err.message : String(err)}`
+    );
     return false;
   }
 }
@@ -269,6 +277,7 @@ export async function run(
   // 每次 LLM 调用都可被 stopRun 中断；同时累加 run 级 token 用量；支持单次调用超时（FR-09）
   const runUsage: RunUsage = { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, unknown: false };
   const budget = workflow.budget;
+  let budgetExceeded = false; // 调用后检查：累计 token 已超出上限（F-07，写入运行记录）
   const callTimeoutSec =
     budget?.callTimeoutSec && budget.callTimeoutSec > 0 ? budget.callTimeoutSec : 0;
   const callChat = (
@@ -301,6 +310,10 @@ export async function run(
       .then((content) => {
         runUsage.calls += 1;
         if (!gotUsage) runUsage.unknown = true;
+        // 调用后检查（F-07）：本次返回后累计已超 token 上限 → 记入运行记录；后续节点会被调用前 guard 拦住
+        if (budget?.maxTokens && budget.maxTokens > 0 && !runUsage.unknown && runUsage.totalTokens > budget.maxTokens) {
+          budgetExceeded = true;
+        }
         return content;
       })
       .catch((err) => {
@@ -432,11 +445,13 @@ export async function run(
       steps,
       memoryRefs,
       input,
+      workflowHash: computeWorkflowHash(workflow), // F-05：续跑时校验工作流未被修改
       outputPreview: final.slice(0, 200),
       finalOutput: final,
       ...(artifactRel ? { artifactPath: artifactRel } : {}),
       nodeRuns,
-      ...(runUsage.calls > 0 ? { usage: runUsage } : {})
+      ...(runUsage.calls > 0 ? { usage: runUsage } : {}),
+      ...(budgetExceeded ? { budgetExceeded: true } : {})
     });
   };
 
@@ -1026,6 +1041,15 @@ function parseGenerated(raw: string): { nodes: WorkflowNode[]; edges: WorkflowEd
       ...(e.style ? { style: e.style } : {}),
       ...(e.data ? { data: e.data } : {})
     }));
+
+  // F-01：AI 生成的条件表达式必须能被白名单求值器解析，否则清空并告警
+  for (const e of edges) {
+    const expr = e.data?.conditionExpr;
+    if (expr && !isSafeCondition(expr)) {
+      console.warn(`[workflowEngine] AI 生成的边条件不被安全求值器支持，已清空: ${expr.slice(0, 120)}`);
+      delete e.data!.conditionExpr;
+    }
+  }
 
   return { nodes, edges };
 }

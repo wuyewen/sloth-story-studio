@@ -55,9 +55,11 @@ export default function ModelsWindow() {
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [encAvailable, setEncAvailable] = useState(true); // 默认视为可用，查询结果返回后再降级显示警告
 
   useEffect(() => {
     void init();
+    void sloth?.app.encryptionAvailable().then(setEncAvailable);
   }, [init]);
 
   useEffect(() => {
@@ -173,6 +175,12 @@ export default function ModelsWindow() {
             <p>管理用于 AI 写作的 OpenAI 兼容模型服务。</p>
           </div>
         </div>
+
+        {!encAvailable && (
+          <p className="inline-msg warn">
+            当前系统不支持安全存储，API Key 将以弱保护方式保存（Base64），建议不要在公共电脑上保存密钥。
+          </p>
+        )}
 
         <div className="model-layout">
           <div className="model-side">

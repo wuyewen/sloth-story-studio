@@ -3,14 +3,14 @@ import path from "node:path";
 import crypto from "node:crypto";
 import type { MemoryProposal, ProposalInput } from "../../shared/types.js";
 import { newId } from "./store.js";
-import { memoryRead, memoryWrite, initMemory, novelDirPath } from "./novelFs.js";
+import { memoryRead, memoryWrite, initMemory, safeProjectDir } from "./novelFs.js";
 
 function projectRoot(projectId: string): string {
   initMemory(projectId);
-  return path.join(novelDirPath(), projectId);
+  return safeProjectDir(projectId);
 }
 
-function proposalsDir(projectId: string, kind: "pending" | "applied"): string {
+function proposalsDir(projectId: string, kind: "pending" | "applied" | "rejected"): string {
   const dir = path.join(projectRoot(projectId), "memory-proposals", kind);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
@@ -20,7 +20,7 @@ function hash(content: string): string {
   return crypto.createHash("sha256").update(content, "utf-8").digest("hex");
 }
 
-function proposalPath(projectId: string, kind: "pending" | "applied", id: string): string {
+function proposalPath(projectId: string, kind: "pending" | "applied" | "rejected", id: string): string {
   return path.join(proposalsDir(projectId, kind), `${id}.json`);
 }
 
@@ -44,7 +44,8 @@ export function list(projectId: string): MemoryProposal[] {
   for (const entry of fs.readdirSync(dir)) {
     if (!entry.endsWith(".json")) continue;
     const p = readProposal(path.join(dir, entry));
-    if (p) out.push(p);
+    // 只返回活跃状态（旧版本曾把 rejected 留在 pending 目录，这里过滤）
+    if (p && (p.status === "pending" || p.status === "conflict")) out.push(p);
   }
   out.sort((a, b) => b.createdAt - a.createdAt);
   return out;
@@ -70,17 +71,20 @@ export function create(projectId: string, input: ProposalInput): MemoryProposal[
   return list(projectId);
 }
 
+// F-06：只有活跃状态（pending/conflict）的提案可被操作；已拒绝/已应用的不在 pending 目录或状态不符
 function findPending(projectId: string, id: string): { p: MemoryProposal; file: string } {
   const file = proposalPath(projectId, "pending", id);
   const p = readProposal(file);
-  if (!p) throw new Error("提案不存在或已处理");
+  if (!p || (p.status !== "pending" && p.status !== "conflict")) throw new Error("提案不存在或已处理");
   return { p, file };
 }
 
+// 拒绝：移出 pending 到 rejected/ 子目录（不再可被接受，也不再出现在列表）
 export function reject(projectId: string, id: string): MemoryProposal[] {
   const { p, file } = findPending(projectId, id);
   p.status = "rejected";
-  writeProposal(file, p);
+  writeProposal(proposalPath(projectId, "rejected", p.id), p);
+  fs.rmSync(file, { force: true });
   return list(projectId);
 }
 

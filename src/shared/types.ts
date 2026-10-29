@@ -142,6 +142,8 @@ export interface WorkflowRunRecord {
   finalOutput?: string; // 完整最终输出
   artifactPath?: string; // 产物文件（项目目录下的相对路径）
   input?: string; // 本次运行输入（断点续跑要用）
+  workflowHash?: string; // 工作流定义 {nodes,edges} 的 sha256（断点续跑校验用）
+  budgetExceeded?: boolean; // 本次运行累计 token 超出预算上限（F-07）
   nodeRuns?: NodeRunRecord[]; // 节点级执行记录（仅 agent/prompt 节点）
   usage?: RunUsage; // 运行级 token 用量汇总
 }
@@ -495,6 +497,8 @@ export interface SlothApi {
   };
   app: {
     openConfig(kind: "models" | "settings"): Promise<void>;
+    encryptionAvailable(): Promise<boolean>; // safeStorage 是否可用（false 时 API Key 降级为 Base64 弱保护）
+    version(): Promise<string>; // 应用版本号（package.json）
     onFocus(cb: () => void): () => void;
   };
 }

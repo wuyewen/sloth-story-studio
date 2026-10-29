@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { StateEntity, StateEntityInput, StateEntityType } from "../../shared/types.js";
 import { newId } from "./store.js";
-import { initMemory, novelDirPath } from "./novelFs.js";
+import { initMemory, safeProjectDir } from "./novelFs.js";
 
 // 结构化状态库（FR-03）：数据存 <项目>/memory/state.json，每次保存后物化出 memory/state-<type>s.md，
 // 供工作流通过 {{memory.state-characters}} 等插值直接引用。
@@ -32,7 +32,7 @@ const GENERATED_MARK = "<!-- 由结构化状态库自动生成，请勿手动编
 
 function memoryDir(projectId: string): string {
   initMemory(projectId);
-  return path.join(novelDirPath(), projectId, "memory");
+  return path.join(safeProjectDir(projectId), "memory");
 }
 
 function statePath(projectId: string): string {
@@ -45,7 +45,7 @@ function writeFileAtomic(file: string, content: string): void {
   fs.renameSync(tmp, file);
 }
 
-// 文件不存在返回空表；损坏时告警并返回空表，不崩
+// 文件不存在返回空表；损坏时先把原文件备份为 state.json.corrupt-<ts>.bak，再按空表处理，不崩
 export function load(projectId: string): StateEntity[] {
   const file = statePath(projectId);
   try {
@@ -58,23 +58,33 @@ export function load(projectId: string): StateEntity[] {
     );
   } catch (err) {
     console.warn(`[novelState] state.json 读取失败，按空表处理: ${err instanceof Error ? err.message : String(err)}`);
+    try {
+      if (fs.existsSync(file)) {
+        fs.copyFileSync(file, `${file}.corrupt-${Date.now()}.bak`);
+      }
+    } catch (backupErr) {
+      console.warn(`[novelState] 损坏文件备份失败: ${backupErr instanceof Error ? backupErr.message : String(backupErr)}`);
+    }
     return [];
   }
 }
 
+// F-04：保存失败向上抛（IPC → UI 显示失败）；物化失败抛明确错误
 function save(projectId: string, entities: StateEntity[]): void {
+  writeFileAtomic(statePath(projectId), JSON.stringify(entities, null, 2));
   try {
-    writeFileAtomic(statePath(projectId), JSON.stringify(entities, null, 2));
     materialize(projectId, entities);
   } catch (err) {
-    console.warn(`[novelState] state.json 写入失败: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`状态已保存但物化失败: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
 // 把状态按类型物化成 memory/state-<type>s.md（每个实体一段：名称、状态、来源，冲突标【冲突】）
+// 任一文件写失败都计入错误并在结束时抛出（由 save 转成明确错误）
 export function materialize(projectId: string, entities?: StateEntity[]): void {
   const list = entities ?? load(projectId);
   const dir = memoryDir(projectId);
+  const failures: string[] = [];
   for (const type of Object.keys(TYPE_FILE) as StateEntityType[]) {
     const file = path.join(dir, TYPE_FILE[type]);
     const items = list.filter((e) => e.type === type);
@@ -103,9 +113,10 @@ export function materialize(projectId: string, entities?: StateEntity[]): void {
       ].join("\n");
       writeFileAtomic(file, body + "\n");
     } catch (err) {
-      console.warn(`[novelState] 物化 ${TYPE_FILE[type]} 失败: ${err instanceof Error ? err.message : String(err)}`);
+      failures.push(`${TYPE_FILE[type]}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  if (failures.length > 0) throw new Error(failures.join("；"));
 }
 
 const short = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);

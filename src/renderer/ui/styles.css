@@ -45,6 +45,7 @@ input[type=range]{accent-color:var(--coral);width:100%}
 .inline-msg{font-size:11px;border-radius:8px;padding:9px 12px;margin:4px 0 12px}
 .inline-msg.ok{background:#eef4ec;color:#4f7a58}
 .inline-msg.err{background:#f9ece7;color:#b04a3c}
+.inline-msg.warn{background:#fdf3e3;color:#b07d2a}
 .form-actions{display:flex;align-items:center;gap:9px;margin-top:6px}
 .color-swatches{display:flex;gap:8px;align-items:center}
 .swatch{width:24px;height:24px;border-radius:7px;border:2px solid transparent;cursor:pointer}
@@ -477,6 +478,7 @@ input[type=range]{accent-color:var(--coral);width:100%}
 
 /* ---- 运行预算 ---- */
 .wf-budget-tag{font-size:8px;color:#b07d2a;background:#fdf3e3;border-radius:4px;padding:2px 5px}
+.budget-exceeded{font-size:9px;color:#b07d2a;background:#fdf3e3;border-radius:4px;padding:2px 7px}
 
 /* ---- 边条件可视化编辑器 ---- */
 .cond-editor{display:flex;flex-direction:column;gap:8px}

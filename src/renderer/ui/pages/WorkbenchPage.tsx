@@ -452,6 +452,8 @@ export default function WorkbenchPage() {
   const [stateEntities, setStateEntities] = useState<StateEntity[]>([]);
   const [stateEdit, setStateEdit] = useState<{ id?: string; type: StateEntityType; name: string; data: string } | null>(null);
   const [stateDeleting, setStateDeleting] = useState<StateEntity | null>(null);
+  const [stateErr, setStateErr] = useState(""); // 状态库写操作失败提示（F-04：保存失败不再静默）
+  const [stateEditErr, setStateEditErr] = useState("");
 
   async function refreshState() {
     if (sloth && project) setStateEntities(await sloth.novels.stateList(project.id));
@@ -459,29 +461,42 @@ export default function WorkbenchPage() {
 
   async function saveStateEntity() {
     if (!sloth || !project || !stateEdit || !stateEdit.name.trim()) return;
-    await sloth.novels.stateUpsert(project.id, {
-      ...(stateEdit.id ? { id: stateEdit.id } : {}),
-      type: stateEdit.type,
-      name: stateEdit.name.trim(),
-      data: stateEdit.data,
-      status: "confirmed", // 作者手动维护的实体视为已确认
-      clearConflict: true
-    });
-    setStateEdit(null);
-    await refreshState();
+    setStateEditErr("");
+    try {
+      await sloth.novels.stateUpsert(project.id, {
+        ...(stateEdit.id ? { id: stateEdit.id } : {}),
+        type: stateEdit.type,
+        name: stateEdit.name.trim(),
+        data: stateEdit.data,
+        status: "confirmed", // 作者手动维护的实体视为已确认
+        clearConflict: true
+      });
+      setStateEdit(null);
+      await refreshState();
+    } catch (err) {
+      setStateEditErr(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function toggleStateLock(e: StateEntity) {
     if (!sloth || !project) return;
-    await sloth.novels.stateSetLock(project.id, e.id, !e.locked);
-    await refreshState();
+    try {
+      await sloth.novels.stateSetLock(project.id, e.id, !e.locked);
+      await refreshState();
+    } catch (err) {
+      setStateErr(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function deleteStateEntity() {
     if (!sloth || !project || !stateDeleting) return;
-    await sloth.novels.stateRemove(project.id, stateDeleting.id);
-    setStateDeleting(null);
-    await refreshState();
+    try {
+      await sloth.novels.stateRemove(project.id, stateDeleting.id);
+      setStateDeleting(null);
+      await refreshState();
+    } catch (err) {
+      setStateErr(err instanceof Error ? err.message : String(err));
+    }
   }
 
   // ---- 章节记忆提取（FR-04）----
@@ -537,6 +552,7 @@ export default function WorkbenchPage() {
   async function applyExtract() {
     if (!sloth || !project || !extractReview) return;
     setExtractApplying(true);
+    setExtractError("");
     try {
       for (const [i, it] of extractReview.items.entries()) {
         if (!extractChecked.has(i)) continue;
@@ -553,6 +569,8 @@ export default function WorkbenchPage() {
       setExtractReview(null);
       setExtractMsg(`已应用 ${extractChecked.size} 条状态到结构化状态库`);
       await refreshState();
+    } catch (err) {
+      setExtractError(`应用失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setExtractApplying(false);
     }
@@ -888,6 +906,7 @@ export default function WorkbenchPage() {
           </div>
           {memTab === "state" ? (
             <div className="state-panel">
+              {stateErr && <p className="inline-msg err">{stateErr}</p>}
               <div className="state-panel-head">
                 <small>状态实体存于 memory/state.json，并自动物化为 state-characters.md 等文件，工作流可用 {"{{memory.state-characters}}"} 引用。</small>
                 <button
@@ -1017,7 +1036,7 @@ export default function WorkbenchPage() {
             共 {extractReview.items.length} 条候选；新增和更新已默认勾选，冲突项需手动确认（应用时会覆盖现有内容，旧值保留在冲突备注中）。
           </p>
           {extractReview.items.length === 0 && <div className="wb-empty">本章没有提取到新增或变化的状态。</div>}
-          <div className="extract-list">
+          {extractError && <p className="inline-msg err">{extractError}</p>}          <div className="extract-list">
             {extractReview.items.map((it, i) => (
               <label key={i} className={`extract-item rel-${it.relation}`}>
                 <input
@@ -1100,6 +1119,7 @@ export default function WorkbenchPage() {
               onChange={(e) => setStateEdit({ ...stateEdit, data: e.target.value })}
             />
           </label>
+          {stateEditErr && <p className="inline-msg err">{stateEditErr}</p>}
           <div className="modal-actions">
             <button className="ghost-button" onClick={() => setStateEdit(null)}>取消</button>
             <button className="primary-button" disabled={!stateEdit.name.trim()} onClick={() => void saveStateEntity()}>
@@ -1142,6 +1162,7 @@ export default function WorkbenchPage() {
             <span>开始 {new Date(runDetail.startedAt).toLocaleString()}</span>
             <span>耗时 {Math.max(1, Math.round((runDetail.endedAt - runDetail.startedAt) / 1000))} 秒</span>
             <span>{runDetail.steps} 步</span>
+            {runDetail.budgetExceeded && <span className="budget-exceeded">已超预算</span>}
             {runDetail.artifactPath && <span>产物：{runDetail.artifactPath}</span>}
             {(() => {
               const wfBudget = workflows.find((w) => w.id === runDetail.workflowId)?.budget;

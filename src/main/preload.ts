@@ -181,6 +181,8 @@ const api: SlothApi = {
   },
   app: {
     openConfig: (kind: "models" | "settings") => ipcRenderer.invoke("app:openConfig", kind),
+    encryptionAvailable: () => ipcRenderer.invoke("app:encryptionAvailable"),
+    version: () => ipcRenderer.invoke("app:version"),
     onFocus: (cb: () => void) => subscribe("app:focus", cb)
   }
 };

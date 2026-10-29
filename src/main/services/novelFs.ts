@@ -284,7 +284,7 @@ export function revealArtifact(projectId: string, rel: string): void {
 }
 
 function metaPath(projectId: string): string {
-  return path.join(novelDir(), projectId, "meta.json");
+  return path.join(projectDirOf(projectId), "meta.json");
 }
 
 function readMeta(projectId: string): MetaFile {
@@ -330,8 +330,35 @@ function countWords(text: string): number {
   return text.replace(/\s+/g, "").length;
 }
 
+// F-02：所有以 projectId 拼路径的入口统一走这里——
+// 拒绝分隔符/.. /绝对路径，resolve 后必须严格位于 novelDir 之下；已存在目录再做 realpath 符号链接检查
+export function safeProjectDir(projectId: string): string {
+  if (
+    !projectId ||
+    /[/\\]/.test(projectId) ||
+    projectId.includes("..") ||
+    projectId.includes("\0") ||
+    path.isAbsolute(projectId)
+  ) {
+    throw new Error("非法项目 id");
+  }
+  const base = path.resolve(novelDir());
+  const resolved = path.resolve(base, projectId);
+  if (resolved === base || !resolved.startsWith(base + path.sep)) {
+    throw new Error("非法项目 id：越出小说目录");
+  }
+  if (fs.existsSync(resolved)) {
+    const realBase = fs.realpathSync(base);
+    const real = fs.realpathSync(resolved);
+    if (real !== realBase && !real.startsWith(realBase + path.sep)) {
+      throw new Error("非法项目目录：符号链接越界");
+    }
+  }
+  return resolved;
+}
+
 function projectDirOf(projectId: string): string {
-  return path.join(novelDir(), projectId);
+  return safeProjectDir(projectId);
 }
 
 export function list(): NovelProject[] {
@@ -369,7 +396,7 @@ export function create(title: string, synopsis: string): NovelProject[] {
     candidate = `${dirName}-${n}`;
   }
   dirName = candidate;
-  fs.mkdirSync(path.join(novelDir(), dirName, "chapters"), { recursive: true });
+  fs.mkdirSync(path.join(safeProjectDir(dirName), "chapters"), { recursive: true });
   const meta: MetaFile = {
     id: dirName,
     title: title.trim() || dirName,
@@ -448,7 +475,10 @@ export function setWorkflowSlot(projectId: string, slot: string, workflowId: str
 }
 
 export function remove(id: string): NovelProject[] {
-  fs.rmSync(projectDirOf(id), { recursive: true, force: true });
+  // F-02：删除前再确认目标是真实存在的项目目录（含 meta.json）
+  const dir = safeProjectDir(id);
+  if (!fs.existsSync(path.join(dir, "meta.json"))) throw new Error("目标不是项目目录，拒绝删除");
+  fs.rmSync(dir, { recursive: true, force: true });
   return list();
 }
 

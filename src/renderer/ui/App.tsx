@@ -124,8 +124,11 @@ export default function App() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [activeSubLabel, setActiveSubLabel] = useState<string>("创作工作台");
 
+  const [appVersion, setAppVersion] = useState("");
+
   useEffect(() => {
     void init();
+    void sloth?.app.version().then(setAppVersion);
   }, [init]);
 
   // 没有项目时默认落在首页（项目在那里新建）
@@ -282,7 +285,7 @@ export default function App() {
           </button>
           <div className="sidebar-foot">
             <span>Sloth Story Studio</span>
-            <span>v0.1.0</span>
+            <span>{appVersion ? `v${appVersion}` : ""}</span>
           </div>
         </div>
       </aside>
