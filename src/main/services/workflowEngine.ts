@@ -744,7 +744,8 @@ export async function run(
                     for (const c of proj.chapters.slice(-recentN)) {
                       let body = novelFs.readChapter(projectId, c.id);
                       if (!body.trim()) continue;
-                      if (body.length > chapterChars) body = `${body.slice(0, chapterChars)}\n（后略）`;
+                      // 取章节结尾：与下一章的衔接信息在末尾（场景悬念/情绪/时间点），而非开头
+                      if (body.length > chapterChars) body = `（前略）\n${body.slice(-chapterChars)}`;
                       parts.push(`### ${c.title}\n${body}`);
                     }
                     text = parts.join("\n\n");
