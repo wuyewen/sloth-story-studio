@@ -480,6 +480,31 @@ input[type=range]{accent-color:var(--coral);width:100%}
 .wf-budget-tag{font-size:8px;color:#b07d2a;background:#fdf3e3;border-radius:4px;padding:2px 5px}
 .budget-exceeded{font-size:9px;color:#b07d2a;background:#fdf3e3;border-radius:4px;padding:2px 7px}
 
+/* ---- 连写 N 章 ---- */
+.chain-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.chain-input{display:flex;align-items:center;gap:7px;font-size:11px;color:#4b525a}
+.chain-input .text-input{width:64px;padding:5px 8px}
+.chain-row small{font-size:10px;color:#a0a2a4}
+.chain-progress{margin:0 0 8px;font-size:11px;font-weight:600;color:#c98a2e}
+.chain-log{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+.chain-log-line{margin:0;font-size:10px;line-height:1.6;padding:5px 9px;border-radius:6px}
+.chain-log-line.is-ok{background:#eef4ec;color:#4f7a58}
+.chain-log-line.is-err{background:#f9ece7;color:#b04a3c}
+.chain-log-line.is-warn{background:#fdf3e3;color:#b07d2a}
+.chain-summary{margin-bottom:10px}
+.chain-conflicts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.chain-conflict-hint{width:100%;margin:4px 0 0;font-size:10px;color:#b07d2a}
+
+/* ---- 批量提取章节 ---- */
+.extract-chapters-head{display:flex;align-items:center;gap:10px}
+.extract-chapters-head .form-label{flex:1}
+.extract-chapters{display:flex;flex-direction:column;gap:4px;max-height:260px;overflow-y:auto;border:1px solid #efece3;border-radius:10px;padding:8px;background:#fbfaf6}
+.extract-chapter{display:flex;align-items:center;gap:8px;font-size:11px;color:#4b525a;padding:4px 6px;border-radius:6px;cursor:pointer}
+.extract-chapter:hover{background:#f7f4ed}
+.extract-chapter input{accent-color:var(--coral)}
+.extract-chapter strong{flex:1;font-weight:600;color:#333a42;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.extract-chapter small{font-size:9px;color:#a0a2a4;flex-shrink:0}
+
 /* ---- 边条件可视化编辑器 ---- */
 .cond-editor{display:flex;flex-direction:column;gap:8px}
 .cond-rules{display:flex;flex-direction:column;gap:8px}

@@ -37,6 +37,8 @@ export function ConfirmDialog({
   message,
   confirmText = "删除",
   blockConfirm = false,
+  altText,
+  onAlt,
   onCancel,
   onConfirm
 }: {
@@ -44,6 +46,8 @@ export function ConfirmDialog({
   message: string;
   confirmText?: string;
   blockConfirm?: boolean;
+  altText?: string; // 第三个按钮（引导动作），如「去提取」
+  onAlt?: () => void;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -54,6 +58,11 @@ export function ConfirmDialog({
         <button className="ghost-button" onClick={onCancel}>
           {blockConfirm ? "知道了" : "取消"}
         </button>
+        {altText && onAlt && (
+          <button className="ghost-button" onClick={onAlt}>
+            {altText}
+          </button>
+        )}
         {!blockConfirm && (
           <button className="danger-button" onClick={onConfirm}>
             {confirmText}

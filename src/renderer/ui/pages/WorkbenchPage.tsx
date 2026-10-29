@@ -190,7 +190,7 @@ export default function WorkbenchPage() {
   const refreshProjects = useStudio((s) => s.refreshProjects);
 
   // 把工作流输出存入当前单元的新章节
-  async function saveAsChapter(text: string): Promise<string | null> {
+  async function saveAsChapter(text: string): Promise<{ id: string; title: string } | null> {
     if (!sloth || !project || !text.trim()) return null;
     const firstLine = text.split(/\r?\n/).find((l) => l.trim())?.trim() ?? "";
     const title = firstLine.replace(/^#+\s*/, "").slice(0, 12) || `第 ${unitChapters.length + 1} 章`;
@@ -202,7 +202,7 @@ export default function WorkbenchPage() {
       if (unit) await sloth.novels.setChapterUnit(project.id, created.id, unit.id);
     }
     await refreshProjects();
-    return created?.title ?? null;
+    return created ? { id: created.id, title: created.title } : null;
   }
 
   function toggleExpand(key: number) {
@@ -218,15 +218,34 @@ export default function WorkbenchPage() {
   const cleanups = useRef<(() => void)[]>([]);
 
   // 入口守卫：明显的误操作给提示（可继续），完全无意义的操作直接拦下
-  const [runGuard, setRunGuard] = useState<{ title: string; message: string; block?: boolean; onOk?: () => void } | null>(null);
+  const [runGuard, setRunGuard] = useState<{ title: string; message: string; block?: boolean; altText?: string; onAlt?: () => void; onOk?: () => void } | null>(null);
 
   function openRun(prefix: string) {
     if (!project) return;
     const unitCount = project.units.length;
     const curChapters = unit?.chapterIds.length ?? 0;
 
-    if (prefix === "WF03" && unitCount === 0) {
-      setRunGuard({ title: "创作下一章", message: "还没有故事单元。请先用「规划新单元」创建单元，再创作章节。", block: true });
+    if (prefix === "WF03") {
+      if (unitCount === 0) {
+        setRunGuard({ title: "创作章节", message: "还没有故事单元。请先用「规划新单元」创建单元，再创作章节。", block: true });
+        return;
+      }
+      // 记忆新鲜度检查：最新章节保存时间晚于状态库最后更新 → 提醒先提取章节记忆
+      void sloth?.novels.stateList(project.id).then((entities) => {
+        const lastChapterAt = Math.max(0, ...project.chapters.map((c) => c.updatedAt ?? 0));
+        const lastStateAt = Math.max(0, ...entities.map((e) => e.updatedAt ?? 0));
+        if (lastChapterAt > 0 && lastChapterAt > lastStateAt) {
+          setRunGuard({
+            title: "创作章节",
+            message: "最近的章节还没提取记忆，角色/伏笔状态可能已过时，直接写新章容易前后不一致。建议先「提取章节记忆」。",
+            altText: "去提取",
+            onAlt: () => openExtract(),
+            onOk: () => doOpenRun(prefix)
+          });
+        } else {
+          doOpenRun(prefix);
+        }
+      });
       return;
     }
     if (prefix === "WF04" && curChapters === 0) {
@@ -234,10 +253,25 @@ export default function WorkbenchPage() {
       return;
     }
     if (prefix === "WF02" && unitCount > 0 && curChapters > 0) {
-      setRunGuard({
-        title: "规划新单元",
-        message: `当前单元「${unit?.title}」已有 ${curChapters} 章。如果它已完结，建议先运行「单元复盘」归档交接，再开启新单元。仍要继续吗？`,
-        onOk: () => doOpenRun(prefix)
+      // 复盘新鲜度检查：当前单元有章节但「单元复盘」没跑过（或复盘后又有新章节）→ 引导先复盘
+      void sloth?.novels.memoryList(project.id).then((files) => {
+        const unitChapterIds = new Set(unit?.chapterIds ?? []);
+        const lastChapterAt = Math.max(0, ...project.chapters.filter((c) => unitChapterIds.has(c.id)).map((c) => c.updatedAt ?? 0));
+        const summary = files.find((f) => f.rel === "unit-summaries/latest.md");
+        const summaryAt = summary?.updatedAt ?? 0;
+        if (summaryAt >= lastChapterAt) {
+          doOpenRun(prefix); // 复盘已覆盖最新章节，直接打开
+          return;
+        }
+        setRunGuard({
+          title: "规划新单元",
+          message: summary
+            ? `当前单元「${unit?.title}」在上次复盘后又写了新章节。建议先重新运行「单元复盘」更新归档，再开启新单元。`
+            : `当前单元「${unit?.title}」已有 ${curChapters} 章，但还没做过「单元复盘」。建议先复盘归档（产出单元摘要与交接），再开启新单元。`,
+          altText: "去复盘",
+          onAlt: () => doOpenRun("WF04"),
+          onOk: () => doOpenRun(prefix)
+        });
       });
       return;
     }
@@ -271,77 +305,190 @@ export default function WorkbenchPage() {
     setRunError("");
     setPropMsg(null);
     setChapterMsg("");
+    setChainCount(1);
+    setChainTotal(0);
+    setChainIdx(0);
+    setChainLog([]);
+    setChainSummary(null);
+    chainStopRef.current = false;
   }
 
-  function beginRun(wf: { id: string; name: string }, inputText: string, resumeFromRunId?: string) {
-    if (!sloth || !project) return;
-    const runId = crypto.randomUUID();
-    runIdRef.current = runId;
-    setTimeline([]);
-    setFinalOutput("");
-    setRunError("");
-    setRunning(true);
-    const off = sloth.workflows.onEvent((ev: WorkflowRunEvent) => {
-      if (ev.runId !== runId) return;
-      if (ev.type === "node-start") {
-        seq.current += 1;
-        setTimeline((t) => [...t, { key: seq.current, label: ev.label ?? "节点", status: "running" }]);
-      } else if (ev.type === "node-done" || ev.type === "node-error") {
-        setTimeline((t) => {
-          const next = [...t];
-          for (let i = next.length - 1; i >= 0; i--) {
-            if (next[i].status === "running") {
-              next[i] = {
-                ...next[i],
-                status: ev.type === "node-done" ? "done" : "error",
-                preview: ev.outputPreview,
-                output: ev.output,
-                error: ev.error
-              };
-              break;
-            }
-          }
-          return next;
-        });
-      } else if (ev.type === "run-done") {
-        setFinalOutput(ev.finalOutput ?? "");
-        setRunning(false);
-      } else if (ev.type === "run-error") {
-        setRunError(ev.error ?? "运行失败");
-        setRunning(false);
+  // 可 await 的单章/单次执行：运行 + 事件订阅 + 清理，resolve 运行结果
+  function runOnce(
+    wf: { id: string; name: string },
+    inputText: string,
+    resumeFromRunId?: string
+  ): Promise<{ finalOutput?: string; error?: string; proposalsCreated?: number }> {
+    return new Promise((resolve) => {
+      if (!sloth || !project) {
+        resolve({ error: "应用未就绪" });
+        return;
       }
-    });
-    cleanups.current.push(off);
-    void sloth.workflows
-      .run(runId, wf.id, inputText, project.id, resumeFromRunId)
-      .then((res) => {
-        if (res?.error) setRunError(res.error);
-        if (res?.finalOutput) setFinalOutput(res.finalOutput);
-        if (res?.proposalsCreated) setPropMsg({ kind: "ok", text: `已自动创建 ${res.proposalsCreated} 条记忆提案，请到「待审核的记忆提案」查看并确认。` });
-        // 「章节创作」槽位的工作流：终稿自动存入当前单元的新章节
-        const isChapterWf = project.workflowSlots?.chapter === wf.id || wf.name.includes("章节创作");
-        if (res?.finalOutput && isChapterWf) {
-          void saveAsChapter(res.finalOutput).then((t) => {
-            if (t) setChapterMsg(`已自动存入新章节《${t}》（当前单元）`);
+      const runId = crypto.randomUUID();
+      runIdRef.current = runId;
+      setTimeline([]);
+      setFinalOutput("");
+      setRunError("");
+      setRunning(true);
+      const off = sloth.workflows.onEvent((ev: WorkflowRunEvent) => {
+        if (ev.runId !== runId) return;
+        if (ev.type === "node-start") {
+          seq.current += 1;
+          setTimeline((t) => [...t, { key: seq.current, label: ev.label ?? "节点", status: "running" }]);
+        } else if (ev.type === "node-done" || ev.type === "node-error") {
+          setTimeline((t) => {
+            const next = [...t];
+            for (let i = next.length - 1; i >= 0; i--) {
+              if (next[i].status === "running") {
+                next[i] = {
+                  ...next[i],
+                  status: ev.type === "node-done" ? "done" : "error",
+                  preview: ev.outputPreview,
+                  output: ev.output,
+                  error: ev.error
+                };
+                break;
+              }
+            }
+            return next;
           });
+        } else if (ev.type === "run-done") {
+          setFinalOutput(ev.finalOutput ?? "");
+        } else if (ev.type === "run-error") {
+          setRunError(ev.error ?? "运行失败");
         }
-        setRunning(false);
-        void refreshRuns();
-        void refreshProposals();
-      })
-      .catch((e) => {
-        setRunError(String(e));
-        setRunning(false);
-      })
-      .finally(() => off());
+      });
+      cleanups.current.push(off);
+      sloth.workflows
+        .run(runId, wf.id, inputText, project.id, resumeFromRunId)
+        .then((res) =>
+          resolve({
+            finalOutput: res?.finalOutput,
+            error: res?.error,
+            proposalsCreated: res?.proposalsCreated
+          })
+        )
+        .catch((e) => resolve({ error: String(e) }))
+        .finally(() => off());
+    });
+  }
+
+  // 单次运行（含章节槽位自动存章节、提案提示、刷新）
+  async function singleRun(wf: { id: string; name: string }, inputText: string, resumeFromRunId?: string) {
+    if (!project) return;
+    const res = await runOnce(wf, inputText, resumeFromRunId);
+    if (res.error) setRunError(res.error);
+    if (res.finalOutput) setFinalOutput(res.finalOutput);
+    if (res.proposalsCreated) setPropMsg({ kind: "ok", text: `已自动创建 ${res.proposalsCreated} 条记忆提案，请到「待审核的记忆提案」查看并确认。` });
+    // 「章节创作」槽位的工作流：终稿自动存入当前单元的新章节
+    const isChapterWf = project.workflowSlots?.chapter === wf.id || wf.name.includes("章节创作");
+    if (res.finalOutput && isChapterWf) {
+      const created = await saveAsChapter(res.finalOutput);
+      if (created) setChapterMsg(`已自动存入新章节《${created.title}》（当前单元）`);
+    }
+    setRunning(false);
+    void refreshRuns();
+    void refreshProposals();
+  }
+
+  // ---- 连写 N 章（仅章节创作槽位）----
+  const [chainCount, setChainCount] = useState(1);
+  const [chainTotal, setChainTotal] = useState(0); // >0 表示本次是连写运行
+  const [chainIdx, setChainIdx] = useState(0);
+  const [chainLog, setChainLog] = useState<{ kind: "ok" | "err" | "warn"; text: string }[]>([]);
+  const [chainSummary, setChainSummary] = useState<{ text: string; conflicts: { type: string; name: string }[] } | null>(null);
+  const chainStopRef = useRef(false);
+
+  async function runChain(wf: { id: string; name: string }, total: number) {
+    if (!project) return;
+    chainStopRef.current = false;
+    setChainTotal(total);
+    setChainIdx(0);
+    setChainLog([]);
+    setChainSummary(null);
+    setPropMsg(null);
+    setChapterMsg("");
+    const baseInput = runInput.trim();
+    let saved = 0;
+    let memApplied = 0;
+    const conflicts: { type: string; name: string }[] = [];
+
+    for (let i = 1; i <= total; i++) {
+      if (chainStopRef.current) break; // 用户点过停止：在章节边界干净退出
+      setChainIdx(i);
+      const inputText =
+        baseInput + (i > 1 ? `\n\n（本次为连写第 ${i} 章，共 ${total} 章；承接上一章结尾继续推进故事。）` : "");
+      const res = await runOnce(wf, inputText);
+      if (res.error || !res.finalOutput) {
+        const msg = `第 ${i} 章失败：${res.error ?? "无输出"}${saved > 0 ? `，已完成的 ${saved} 章已保存` : ""}`;
+        setChainLog((l) => [...l, { kind: "err", text: msg }]);
+        break;
+      }
+      const created = await saveAsChapter(res.finalOutput);
+      if (created) saved++;
+      // 自动提取记忆：new/update 直接落库，conflict 记入待裁决列表；提取失败不中断连写
+      if (created) {
+        try {
+          const ex = await sloth!.novels.extractChapterState(project.id, {
+            unitId: unit?.id,
+            chapterId: created.id
+          });
+          let memCount = 0;
+          for (const it of ex.items) {
+            if (it.relation === "conflict") {
+              conflicts.push({ type: it.entity.type, name: it.entity.name });
+              continue;
+            }
+            await sloth!.novels.stateUpsert(project.id, {
+              type: it.entity.type,
+              name: it.entity.name,
+              data: it.entity.data,
+              status: it.entity.status,
+              ...(it.entity.source ? { source: it.entity.source } : {})
+            });
+            memCount++;
+          }
+          memApplied += memCount;
+          setChainLog((l) => [
+            ...l,
+            { kind: "ok", text: `第 ${i} 章 ✓ 已保存《${created.title}》${memCount > 0 ? ` · 记忆 +${memCount} 条` : ""}` }
+          ]);
+        } catch (err) {
+          setChainLog((l) => [
+            ...l,
+            {
+              kind: "warn",
+              text: `第 ${i} 章已保存《${created.title}》，但记忆提取失败：${err instanceof Error ? err.message : String(err)}（不中断连写）`
+            }
+          ]);
+        }
+      } else {
+        setChainLog((l) => [...l, { kind: "warn", text: `第 ${i} 章运行成功但存章节失败` }]);
+      }
+    }
+
+    setRunning(false);
+    setChainSummary({
+      text: `连写结束：已保存 ${saved}/${total} 章；记忆自动更新 ${memApplied} 条${conflicts.length > 0 ? `；${conflicts.length} 条冲突待裁决` : ""}`,
+      conflicts
+    });
+    await refreshState();
+    void refreshProjects();
+    void refreshRuns();
+    void refreshProposals();
   }
 
   function startRun() {
-    if (!runWf) return;
-    beginRun(runWf, runInput.trim());
+    if (!runWf || !project) return;
+    const isChapterWf = project.workflowSlots?.chapter === runWf.id || runWf.name.includes("章节创作");
+    if (isChapterWf && chainCount > 1) {
+      void runChain(runWf, Math.min(10, Math.max(1, chainCount)));
+      return;
+    }
+    void singleRun(runWf, runInput.trim());
   }
 
-  // 断点续跑：以同一工作流 + 原输入 + resumeFromRunId 发起新运行，已成功的节点复用上次输出
+  // 断点续跑：以同一工作流 + 原输入 + resumeFromRunId 发起新运行，已成功的节点复用上次输出（不走连写）
   function resumeRun(rec: WorkflowRunRecord) {
     const wf = workflows.find((w) => w.id === rec.workflowId);
     if (!wf || !project) return;
@@ -352,10 +499,12 @@ export default function WorkbenchPage() {
     setRunInput(rec.input ?? "");
     setPropMsg(null);
     setChapterMsg("");
-    beginRun({ id: wf.id, name: wf.name }, inputText, rec.runId);
+    setChainCount(1);
+    void singleRun({ id: wf.id, name: wf.name }, inputText, rec.runId);
   }
 
   function stopRun() {
+    chainStopRef.current = true; // 连写时让循环在当前章结束后中断
     if (sloth && runIdRef.current) void sloth.workflows.stop(runIdRef.current);
   }
 
@@ -499,25 +648,48 @@ export default function WorkbenchPage() {
     }
   }
 
-  // ---- 章节记忆提取（FR-04）----
+  // ---- 章节记忆提取（FR-04，多选批量）----
   const [extractOpen, setExtractOpen] = useState(false);
   const [extractUnitId, setExtractUnitId] = useState("");
-  const [extractChapterId, setExtractChapterId] = useState("");
+  const [extractChapterIds, setExtractChapterIds] = useState<Set<string>>(new Set());
+  const [extractLatestStateAt, setExtractLatestStateAt] = useState(0); // 状态库最新实体时间，用于默认勾选"提取后有更新"的章节
   const [extracting, setExtracting] = useState(false);
+  const [extractProgress, setExtractProgress] = useState<{ i: number; n: number; title: string } | null>(null);
   const [extractError, setExtractError] = useState("");
-  const [extractReview, setExtractReview] = useState<{ chapterTitle: string; items: StateExtractItem[] } | null>(null);
+  interface ReviewRow {
+    chapterTitle: string;
+    item: StateExtractItem;
+  }
+  const [extractReview, setExtractReview] = useState<{ chapters: number; items: ReviewRow[]; failures: { title: string; error: string }[] } | null>(null);
   const [extractChecked, setExtractChecked] = useState<Set<number>>(new Set());
   const [extractApplying, setExtractApplying] = useState(false);
   const [extractMsg, setExtractMsg] = useState("");
 
-  function openExtract() {
-    if (!project) return;
+  // 默认勾选：updatedAt 晚于状态库最新实体的章节（"提取后有更新"）；全部已提取过则只勾最后一章
+  function defaultCheckedFor(unitId: string, latestStateAt: number): Set<string> {
+    if (!project) return new Set();
+    const u = project.units.find((x) => x.id === unitId);
+    const ids = (u?.chapterIds ?? []).filter((id) => project.chapters.some((c) => c.id === id));
+    const updatedAfter = ids.filter((id) => {
+      const c = project.chapters.find((x) => x.id === id);
+      return c && c.words > 0 && c.updatedAt > latestStateAt;
+    });
+    return new Set(updatedAfter.length > 0 ? updatedAfter : ids.slice(-1));
+  }
+
+  async function openExtract() {
+    if (!project || !sloth) return;
     const u = unit ?? project.units[project.units.length - 1] ?? null;
-    setExtractUnitId(u?.id ?? "");
-    const chapterIds = u?.chapterIds ?? [];
-    setExtractChapterId(chapterIds[chapterIds.length - 1] ?? ""); // 默认最新章节
+    const uid = u?.id ?? "";
+    setExtractUnitId(uid);
     setExtractError("");
     setExtractMsg("");
+    setExtractProgress(null);
+    const entities = await sloth.novels.stateList(project.id);
+    setStateEntities(entities);
+    const latest = entities.reduce((m, e) => Math.max(m, e.updatedAt), 0);
+    setExtractLatestStateAt(latest);
+    setExtractChapterIds(defaultCheckedFor(uid, latest));
     setExtractOpen(true);
   }
 
@@ -529,24 +701,46 @@ export default function WorkbenchPage() {
       .filter((c): c is NonNullable<typeof c> => Boolean(c));
   }, [project, extractUnitId]);
 
+  function toggleExtractChapter(id: string) {
+    setExtractChapterIds((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  // 批量提取：按章节顺序串行，单章失败不中断
   async function runExtract() {
-    if (!sloth || !project || !extractChapterId) return;
+    if (!sloth || !project) return;
+    const targets = extractChapters.filter((c) => extractChapterIds.has(c.id));
+    if (targets.length === 0) return;
     setExtracting(true);
     setExtractError("");
-    try {
-      const res = await sloth.novels.extractChapterState(project.id, {
-        unitId: extractUnitId || undefined,
-        chapterId: extractChapterId
-      });
-      setExtractReview(res);
-      // 新增和更新默认勾选，冲突项默认不勾选
-      setExtractChecked(new Set(res.items.map((it, i) => (it.relation === "conflict" ? -1 : i)).filter((i) => i >= 0)));
-      setExtractOpen(false);
-    } catch (err) {
-      setExtractError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setExtracting(false);
+    const agg: ReviewRow[] = [];
+    const failures: { title: string; error: string }[] = [];
+    for (const [i, c] of targets.entries()) {
+      setExtractProgress({ i: i + 1, n: targets.length, title: c.title });
+      try {
+        const res = await sloth.novels.extractChapterState(project.id, {
+          unitId: extractUnitId || undefined,
+          chapterId: c.id
+        });
+        for (const it of res.items) agg.push({ chapterTitle: res.chapterTitle, item: it });
+      } catch (err) {
+        failures.push({ title: c.title, error: err instanceof Error ? err.message : String(err) });
+      }
     }
+    setExtractProgress(null);
+    setExtracting(false);
+    if (agg.length === 0 && failures.length > 0) {
+      setExtractError(`全部提取失败（${failures.length} 章）：${failures[0].error}`);
+      return;
+    }
+    setExtractReview({ chapters: targets.length, items: agg, failures });
+    // 新增和更新默认勾选，冲突项默认不勾选
+    setExtractChecked(new Set(agg.map((x, i) => (x.item.relation === "conflict" ? -1 : i)).filter((i) => i >= 0)));
+    setExtractOpen(false);
   }
 
   async function applyExtract() {
@@ -554,8 +748,9 @@ export default function WorkbenchPage() {
     setExtractApplying(true);
     setExtractError("");
     try {
-      for (const [i, it] of extractReview.items.entries()) {
+      for (const [i, row] of extractReview.items.entries()) {
         if (!extractChecked.has(i)) continue;
+        const it = row.item;
         await sloth.novels.stateUpsert(project.id, {
           type: it.entity.type,
           name: it.entity.name,
@@ -647,7 +842,7 @@ export default function WorkbenchPage() {
   const actions = [
     { icon: BookMarked, title: "全书规划", desc: "设定 · 主线 · 伏笔", prefix: "WF01" },
     { icon: Layers, title: "规划新单元", desc: "主角 · 背景 · 章节拆分", prefix: "WF02" },
-    { icon: PenLine, title: "创作下一章", desc: "写作 · 评审 · 返修", prefix: "WF03" },
+    { icon: PenLine, title: "创作章节", desc: "写作 · 评审 · 返修", prefix: "WF03" },
     { icon: FolderTree, title: "单元复盘", desc: "归档 · 记忆更新 · 交接", prefix: "WF04" }
   ];
 
@@ -816,6 +1011,37 @@ export default function WorkbenchPage() {
               }
             />
           </label>
+          {project && (project.workflowSlots?.chapter === runWf.id || runWf.name.includes("章节创作")) && (
+            <div className="chain-row">
+              <label className="chain-input">
+                连写
+                <input
+                  className="text-input"
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={chainCount}
+                  disabled={running}
+                  onChange={(e) => {
+                    const n = Number(e.target.value);
+                    if (Number.isFinite(n) && n >= 1) setChainCount(Math.min(10, Math.floor(n)));
+                  }}
+                />
+                章
+              </label>
+              <small>连写时每章自动存入新章节并提取记忆</small>
+            </div>
+          )}
+          {chainTotal > 1 && (running || chainIdx > 0) && (
+            <p className="chain-progress">{running ? `连写进度：第 ${chainIdx} / ${chainTotal} 章` : ""}</p>
+          )}
+          {chainLog.length > 0 && (
+            <div className="chain-log">
+              {chainLog.map((l, i) => (
+                <p key={i} className={`chain-log-line is-${l.kind}`}>{l.text}</p>
+              ))}
+            </div>
+          )}
           <div className="ai-run-row">
             <button className="primary-button" disabled={running || !runInput.trim()} onClick={startRun}>
               {running ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
@@ -833,6 +1059,19 @@ export default function WorkbenchPage() {
             )}
           </div>
           {runError && <p className="inline-msg err">{runError}</p>}
+          {chainSummary && (
+            <div className="chain-summary">
+              <p className="inline-msg ok">{chainSummary.text}</p>
+              {chainSummary.conflicts.length > 0 && (
+                <div className="chain-conflicts">
+                  {chainSummary.conflicts.map((c, i) => (
+                    <span key={i} className="run-mem-ref">{STATE_TYPE_LABEL[c.type as StateEntityType] ?? c.type} · {c.name}</span>
+                  ))}
+                  <p className="chain-conflict-hint">请到「管理共享记忆 → 结构化状态」处理这些冲突。</p>
+                </div>
+              )}
+            </div>
+          )}
           {timeline.length > 0 && (
             <div className="wf-timeline">
               {timeline.map((item) => (
@@ -875,7 +1114,7 @@ export default function WorkbenchPage() {
               {chapterMsg && <p className="inline-msg ok">{chapterMsg}</p>}
               <div className="output-actions">
                 {(project?.workflowSlots?.chapter === runWf.id || runWf.name.includes("章节创作")) && (
-                  <button className="ghost-button small" onClick={() => void saveAsChapter(finalOutput).then((t) => t && setChapterMsg(`已存入新章节《${t}》（当前单元）`))}>
+                  <button className="ghost-button small" onClick={() => void saveAsChapter(finalOutput).then((c) => c && setChapterMsg(`已存入新章节《${c.title}》（当前单元）`))}>
                     存入新章节
                   </button>
                 )}
@@ -990,19 +1229,18 @@ export default function WorkbenchPage() {
       )}
 
       {extractOpen && project && (
-        <Modal title="提取章节记忆" onClose={() => setExtractOpen(false)} width={520}>
-          <p className="prop-reason">从章节正文中提取角色、伏笔、事件等结构化状态，审阅确认后写入状态库。</p>
+        <Modal title="提取章节记忆" onClose={() => !extracting && setExtractOpen(false)} width={560}>
+          <p className="prop-reason">从章节正文中批量提取角色、伏笔、事件等结构化状态，审阅确认后写入状态库。</p>
           <label className="form-row">
             <span className="form-label">故事单元</span>
             <select
               className="text-input"
               value={extractUnitId}
+              disabled={extracting}
               onChange={(e) => {
                 const uid = e.target.value;
                 setExtractUnitId(uid);
-                const u = project.units.find((x) => x.id === uid);
-                const ids = u?.chapterIds ?? [];
-                setExtractChapterId(ids[ids.length - 1] ?? "");
+                setExtractChapterIds(defaultCheckedFor(uid, extractLatestStateAt));
               }}
             >
               {project.units.map((u) => (
@@ -1010,34 +1248,76 @@ export default function WorkbenchPage() {
               ))}
             </select>
           </label>
-          <label className="form-row">
-            <span className="form-label">章节</span>
-            <select className="text-input" value={extractChapterId} onChange={(e) => setExtractChapterId(e.target.value)}>
-              {extractChapters.length === 0 && <option value="">该单元暂无章节</option>}
+          <div className="form-row">
+            <div className="extract-chapters-head">
+              <span className="form-label">章节（默认勾选提取后有更新的）</span>
+              <button className="text-button" disabled={extracting} onClick={() => setExtractChapterIds(new Set(extractChapters.map((c) => c.id)))}>
+                全选
+              </button>
+              <button className="text-button" disabled={extracting} onClick={() => setExtractChapterIds(new Set())}>
+                全不选
+              </button>
+            </div>
+            <div className="extract-chapters">
+              {extractChapters.length === 0 && <div className="wb-empty">该单元暂无章节</div>}
               {extractChapters.map((c) => (
-                <option key={c.id} value={c.id}>{c.title}{c.words > 0 ? `（${c.words} 字）` : "（空）"}</option>
+                <label key={c.id} className="extract-chapter">
+                  <input
+                    type="checkbox"
+                    checked={extractChapterIds.has(c.id)}
+                    disabled={extracting}
+                    onChange={() => toggleExtractChapter(c.id)}
+                  />
+                  <strong>{c.title}</strong>
+                  <small>{c.words > 0 ? `${c.words} 字` : "空"}</small>
+                  <small>{new Date(c.updatedAt).toLocaleString()}</small>
+                  {c.words > 0 && c.updatedAt > extractLatestStateAt && <span className="state-badge rel-update">有更新</span>}
+                </label>
               ))}
-            </select>
-          </label>
+            </div>
+          </div>
+          {extractProgress && (
+            <p className="inline-msg ok">
+              <Loader2 size={12} className="spin" /> 正在提取 第 {extractProgress.i}/{extractProgress.n} 章《{extractProgress.title}》…
+            </p>
+          )}
           {extractError && <p className="inline-msg err">{extractError}</p>}
           <div className="modal-actions">
-            <button className="ghost-button" onClick={() => setExtractOpen(false)}>取消</button>
-            <button className="primary-button" disabled={extracting || !extractChapterId} onClick={() => void runExtract()}>
+            <button className="ghost-button" disabled={extracting} onClick={() => setExtractOpen(false)}>取消</button>
+            <button
+              className="primary-button"
+              disabled={extracting || extractChapters.length === 0 || extractChapterIds.size === 0}
+              onClick={() => void runExtract()}
+            >
               {extracting ? <Loader2 size={14} className="spin" /> : <ScanSearch size={14} />}
-              {extracting ? "提取中…" : "开始提取"}
+              {extracting ? "提取中…" : `开始提取（${extractChapterIds.size} 章）`}
             </button>
           </div>
         </Modal>
       )}
 
       {extractReview && project && (
-        <Modal title={`提取结果 · ${extractReview.chapterTitle}`} onClose={() => setExtractReview(null)} width={640}>
-          <p className="prop-reason">
-            共 {extractReview.items.length} 条候选；新增和更新已默认勾选，冲突项需手动确认（应用时会覆盖现有内容，旧值保留在冲突备注中）。
-          </p>
-          {extractReview.items.length === 0 && <div className="wb-empty">本章没有提取到新增或变化的状态。</div>}
-          {extractError && <p className="inline-msg err">{extractError}</p>}          <div className="extract-list">
-            {extractReview.items.map((it, i) => (
+        <Modal title={`提取结果 · ${extractReview.chapters} 章`} onClose={() => setExtractReview(null)} width={640}>
+          {(() => {
+            const n = { new: 0, update: 0, conflict: 0 };
+            for (const r of extractReview.items) n[r.item.relation]++;
+            return (
+              <p className="prop-reason">
+                共 {extractReview.chapters} 章，提取出 {extractReview.items.length} 条（新增 {n.new} / 更新 {n.update} / 冲突 {n.conflict}）；新增和更新已默认勾选，冲突项需手动确认（应用时会覆盖现有内容，旧值保留在冲突备注中）。
+              </p>
+            );
+          })()}
+          {extractReview.failures.length > 0 && (
+            <p className="inline-msg warn">
+              {extractReview.failures.length} 章提取失败：{extractReview.failures.map((f) => `《${f.title}》${f.error}`).join("；")}
+            </p>
+          )}
+          {extractReview.items.length === 0 && <div className="wb-empty">所选章节没有提取到新增或变化的状态。</div>}
+          {extractError && <p className="inline-msg err">{extractError}</p>}
+          <div className="extract-list">
+            {extractReview.items.map((row, i) => {
+              const it = row.item;
+              return (
               <label key={i} className={`extract-item rel-${it.relation}`}>
                 <input
                   type="checkbox"
@@ -1053,6 +1333,7 @@ export default function WorkbenchPage() {
                 />
                 <div className="extract-item-body">
                   <div className="extract-item-head">
+                    <span className="state-badge neutral">{row.chapterTitle}</span>
                     <span className="state-badge neutral">{STATE_TYPE_LABEL[it.entity.type]}</span>
                     <strong>{it.entity.name}</strong>
                     <span className={`state-badge rel-${it.relation}`}>
@@ -1069,7 +1350,8 @@ export default function WorkbenchPage() {
                   )}
                 </div>
               </label>
-            ))}
+              );
+            })}
           </div>
           <div className="modal-actions">
             <button className="ghost-button" onClick={() => setExtractReview(null)}>取消</button>
@@ -1144,6 +1426,12 @@ export default function WorkbenchPage() {
           message={runGuard.message}
           blockConfirm={runGuard.block}
           confirmText="仍要继续"
+          altText={runGuard.altText}
+          onAlt={runGuard.altText ? () => {
+            const fn = runGuard.onAlt;
+            setRunGuard(null);
+            fn?.();
+          } : undefined}
           onCancel={() => setRunGuard(null)}
           onConfirm={() => {
             const fn = runGuard.onOk;
