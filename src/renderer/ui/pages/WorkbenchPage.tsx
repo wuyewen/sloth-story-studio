@@ -1406,7 +1406,7 @@ export default function WorkbenchPage() {
               className="text-input"
               value={stateEdit.name}
               onChange={(e) => setStateEdit({ ...stateEdit, name: e.target.value })}
-              placeholder="如：林渡 / F02 你是第一个查契约的"
+              placeholder="如：张三 / F01 神秘来信"
             />
           </label>
           <label className="form-row">

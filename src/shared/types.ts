@@ -331,7 +331,7 @@ export type StateEntityType = "character" | "foreshadowing" | "event" | "item" |
 export interface StateEntity {
   id: string; // 主进程生成
   type: StateEntityType;
-  name: string; // 如「林渡」「F02 你是第一个查契约的」
+  name: string; // 如「张三」「F01 神秘来信」
   data: string; // 状态描述（markdown 文本）
   status: "confirmed" | "inferred"; // confirmed=正文明确事实/作者确认；inferred=模型推断
   source?: string; // 来源章节标题
