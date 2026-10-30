@@ -9,6 +9,7 @@ import { useFocusRefresh } from "../hooks/useFocusRefresh";
 import { Modal, ConfirmDialog } from "../components/Modal";
 import type { MemoryFileInfo, MemoryProposal, MemoryVersion, NodeRunRecord, StateEntity, StateEntityType, StateExtractItem, WorkflowRunEvent, WorkflowRunRecord } from "../../../shared/types";
 import CustomFlowModal from "./workbench/CustomFlowModal";
+import SimpleMode from "./workbench/SimpleMode";
 
 const STATE_TYPE_LABEL: Record<StateEntityType, string> = {
   character: "角色",
@@ -584,6 +585,9 @@ export default function WorkbenchPage() {
 
   const pendingProposals = proposals.filter((p) => p.status === "pending" || p.status === "conflict");
 
+  // ---- 模式切换：专业模式 / 极简创作 ----
+  const [wbMode, setWbMode] = useState<"pro" | "simple">("pro");
+
   // ---- 记忆管理 ----
   const [memOpen, setMemOpen] = useState(false);
   const [memFiles, setMemFiles] = useState<MemoryFileInfo[]>([]);
@@ -866,6 +870,12 @@ export default function WorkbenchPage() {
 
       {project && (
         <>
+          <div className="wb-mode-row">
+            <div className="segmented">
+              <button className={wbMode === "pro" ? "active" : ""} onClick={() => setWbMode("pro")}>专业模式</button>
+              <button className={wbMode === "simple" ? "active" : ""} onClick={() => setWbMode("simple")}>极简创作</button>
+            </div>
+          </div>
           <div className="wb-head">
             <div className="wb-proj">
               <div className="wb-proj-row">
@@ -900,8 +910,13 @@ export default function WorkbenchPage() {
             </div>
           </div>
 
-          <div className="wb-actions">
-            {actions.map((a) => (
+          {wbMode === "simple" && (
+            <SimpleMode project={project} workflows={workflows} refreshProjects={refreshProjects} />
+          )}
+
+          {wbMode === "pro" && (
+          <>
+          <div className="wb-actions">{actions.map((a) => (
               <button key={a.prefix} className="wb-action" onClick={() => openRun(a.prefix)}>
                 <span className="wb-action-icon"><a.icon size={18} /></span>
                 <strong>{a.title}</strong>
@@ -987,6 +1002,8 @@ export default function WorkbenchPage() {
               )}
             </section>
           </div>
+          </>
+          )}
         </>
       )}
 

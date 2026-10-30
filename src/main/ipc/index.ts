@@ -292,7 +292,7 @@ export function registerIpc(): void {
   );
   ipcMain.handle("novels:rename", (_e, id: string, title: string) => novelFs.rename(id, title));
 
-  ipcMain.handle("novels:updateMeta", (_e, id: string, patch: { title?: string; synopsis?: string; styleId?: string | null }) =>
+  ipcMain.handle("novels:updateMeta", (_e, id: string, patch: { title?: string; synopsis?: string; styleId?: string | null; unitChapterCap?: number | null }) =>
     novelFs.updateMeta(id, patch)
   );
 

@@ -78,6 +78,7 @@ export interface NovelProject {
   workflowIds: string[]; // 本书关联的工作流
   workflowSlots?: Partial<Record<WorkflowSlot, string>>; // 工作台四个操作位绑定的工作流
   styleId?: string; // 绑定的风格模板（FR-06），空为不绑定
+  unitChapterCap?: number | null; // 每单元章数上限（极简创作模式写满自动完结归档并开新单元），空=不限
 }
 
 export type WorkflowSlot = "planning" | "unit" | "chapter" | "review";
@@ -416,7 +417,7 @@ export interface SlothApi {
     list(): Promise<NovelProject[]>;
     create(title: string, synopsis: string): Promise<NovelProject[]>;
     rename(id: string, title: string): Promise<NovelProject[]>;
-    updateMeta(id: string, patch: { title?: string; synopsis?: string; styleId?: string | null }): Promise<NovelProject[]>;
+    updateMeta(id: string, patch: { title?: string; synopsis?: string; styleId?: string | null; unitChapterCap?: number | null }): Promise<NovelProject[]>;
     assignWorkflow(projectId: string, workflowId: string): Promise<NovelProject[]>;
     unassignWorkflow(projectId: string, workflowId: string): Promise<NovelProject[]>;
     setWorkflowSlot(projectId: string, slot: WorkflowSlot, workflowId: string | null): Promise<NovelProject[]>;

@@ -32,6 +32,7 @@ interface MetaFile {
   workflowIds?: string[];
   workflowSlots?: Partial<Record<WorkflowSlot, string>>;
   styleId?: string; // 绑定的风格模板（FR-06）
+  unitChapterCap?: number | null; // 每单元章数上限
 }
 
 // ---- 项目级共享记忆 ----
@@ -418,11 +419,15 @@ export function rename(id: string, title: string): NovelProject[] {
   return list();
 }
 
-export function updateMeta(id: string, patch: { title?: string; synopsis?: string; styleId?: string | null }): NovelProject[] {
+export function updateMeta(id: string, patch: { title?: string; synopsis?: string; styleId?: string | null; unitChapterCap?: number | null }): NovelProject[] {
   const meta = readMeta(id);
   if (patch.title !== undefined) meta.title = patch.title.trim() || meta.title;
   if (patch.synopsis !== undefined) meta.synopsis = patch.synopsis;
   if (patch.styleId !== undefined) meta.styleId = patch.styleId || undefined;
+  if (patch.unitChapterCap !== undefined) {
+    const n = patch.unitChapterCap;
+    meta.unitChapterCap = typeof n === "number" && Number.isFinite(n) && n >= 1 ? Math.min(50, Math.floor(n)) : null;
+  }
   writeMeta(meta);
   return list();
 }
