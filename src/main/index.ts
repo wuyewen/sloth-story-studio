@@ -4,6 +4,7 @@ import path from "node:path";
 import { createTray, getIsQuitting } from "./tray.js";
 import { openMainWindow } from "./windows.js";
 import { registerIpc } from "./ipc/index.js";
+import { setupAppMenu } from "./menu.js";
 
 function devAsset(rel: string): string | null {
   // dev 下 electron 从项目根启动，cwd 即项目根；改名 bundle 会导致 app.isPackaged 误判，不用它
@@ -39,6 +40,7 @@ if (!app.requestSingleInstanceLock()) {
 
 app.whenReady().then(() => {
   setDockIcon();
+  setupAppMenu();
   registerIpc();
   createTray();
   openMainWindow();

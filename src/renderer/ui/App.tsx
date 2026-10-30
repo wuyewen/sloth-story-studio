@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BookOpen, Home, Palette, Sparkles, Workflow, Search, ChevronRight, SlidersHorizontal, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { BookOpen, Cpu, Home, Palette, Sparkles, Workflow, Search, ChevronRight, SlidersHorizontal, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { sloth } from "../api";
 import { useStudio } from "../state/store";
 import { BridgeMissing } from "./components/Modal";
@@ -279,6 +279,10 @@ export default function App() {
         </nav>
         </div>
         <div className="sidebar-bottom">
+          <button className="nav-item" onClick={() => void sloth?.app.openConfig("models")}>
+            <Cpu size={18} strokeWidth={1.8} />
+            <span>大模型配置</span>
+          </button>
           <button className="nav-item" onClick={() => void sloth?.app.openConfig("settings")}>
             <SlidersHorizontal size={18} strokeWidth={1.8} />
             <span>设置</span>

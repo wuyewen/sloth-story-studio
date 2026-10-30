@@ -104,3 +104,41 @@ export function openConfigWindow(kind: "models" | "settings"): BrowserWindow {
   configWindow = win;
   return win;
 }
+
+let helpWindow: BrowserWindow | null = null;
+
+export function openHelpWindow(): BrowserWindow {
+  if (helpWindow && !helpWindow.isDestroyed()) {
+    helpWindow.show();
+    helpWindow.focus();
+    return helpWindow;
+  }
+
+  const win = new BrowserWindow({
+    width: 760,
+    height: 720,
+    minWidth: 640,
+    minHeight: 480,
+    title: "使用指南",
+    backgroundColor: "#F1E6CC",
+    show: false,
+    ...(process.platform === "win32" ? { icon: appIcon() } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      sandbox: false
+    }
+  });
+
+  win.once("ready-to-show", () => {
+    win.center();
+    win.show();
+  });
+  win.on("closed", () => {
+    if (helpWindow === win) helpWindow = null;
+  });
+
+  loadRenderer(win, "/help");
+  helpWindow = win;
+  return win;
+}

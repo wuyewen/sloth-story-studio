@@ -505,6 +505,37 @@ input[type=range]{accent-color:var(--coral);width:100%}
 .extract-chapter strong{flex:1;font-weight:600;color:#333a42;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .extract-chapter small{font-size:9px;color:#a0a2a4;flex-shrink:0}
 
+/* ---- 极简创作模式 ---- */
+.wb-mode-row{display:flex;justify-content:flex-end}
+.simple-mode{display:grid;grid-template-columns:220px minmax(0,1fr);gap:14px;min-height:480px}
+.simple-toc{background:#fffefa;border:1px solid #ece9e2;border-radius:13px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.simple-toc-list{flex:1;overflow-y:auto;padding:8px}
+.simple-toc-group{margin-bottom:8px}
+.simple-toc-item{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;border:0;background:transparent;text-align:left;padding:6px 10px;border-radius:8px;font-size:11px;color:#3b424a;cursor:pointer}
+.simple-toc-item:hover{background:#f7f4ed}
+.simple-toc-item span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.simple-toc-item small{font-size:9px;color:#a3a4a2;flex-shrink:0}
+.simple-chat{background:#fffefa;border:1px solid #ece9e2;border-radius:13px;display:flex;flex-direction:column;min-height:480px;overflow:hidden}
+.simple-msgs{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+.simple-msg{max-width:78%;font-size:12px;line-height:1.8}
+.simple-msg.user{align-self:flex-end;background:#f7e6df;color:#8a4438;border-radius:13px 13px 4px 13px;padding:9px 13px;white-space:pre-wrap}
+.simple-msg.sys{align-self:flex-start;background:#fbfaf6;border:1px solid #efece3;border-radius:13px 13px 13px 4px;padding:10px 13px;color:#3b424a}
+.simple-msg.sys.kind-error{border-color:#eccdc3;background:#fdf5f3;color:#b04a3c}
+.simple-text{white-space:pre-wrap}
+.simple-progress{display:flex;align-items:center;gap:7px;color:#c98a2e}
+.simple-chapter-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.simple-msg.sys.kind-chapter small{display:block;margin-top:5px;color:#a0a2a4;font-size:10px}
+.simple-input-row{display:flex;gap:8px;padding:12px;border-top:1px solid #f0eee7}
+.simple-input{flex:1;resize:none}
+.simple-send{flex-shrink:0;align-self:flex-end}
+.simple-preview{max-height:60vh;overflow:auto}
+
+/* ---- 极简模式 · 单元上限设置 ---- */
+.simple-cap-row{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid #f0eee7}
+.simple-cap{display:flex;align-items:center;gap:7px;font-size:11px;color:#4b525a;flex-shrink:0}
+.simple-cap .text-input{width:60px;padding:4px 8px}
+.simple-cap-row small{font-size:9px;color:#a0a2a4;line-height:1.5}
+
 /* ---- 边条件可视化编辑器 ---- */
 .cond-editor{display:flex;flex-direction:column;gap:8px}
 .cond-rules{display:flex;flex-direction:column;gap:8px}
@@ -596,3 +627,11 @@ input[type=range]{accent-color:var(--coral);width:100%}
 
 /* ---- 章节列与工具条字数 ---- */
 .editor-toolbar-words{color:#9a9ea4;font-weight:400}
+
+/* ---- 使用指南窗口 ---- */
+.help-page{min-height:100vh;background:#f8f7f3;padding:28px 36px}
+.help-body{max-width:680px;margin:0 auto;background:#fffefa;border:1px solid #ece9e2;border-radius:14px;padding:26px 32px;font-size:13px;line-height:1.8}
+.help-body h1{font-size:20px;margin:0 0 12px}
+.help-body h2{font-size:15px;margin:22px 0 8px}
+.help-body table{font-size:11px}
+.help-body code{font-size:11px}
